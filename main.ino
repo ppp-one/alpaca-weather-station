@@ -89,9 +89,12 @@ void S700_array()
 String readRS485() {
   String val = "";
 
+  RS485.noReceive();
   RS485.beginTransmission();
   RS485.println("0XA;G0?");
   RS485.endTransmission();
+  RS485.flush();
+  RS485.receive();
 
   if (RS485.available()) {
     auto peeked = RS485.peek();
@@ -106,12 +109,13 @@ String readRS485() {
     }
   }
 
-  // Serial.println(val);
+  Serial.println(val);
 
-  // if it begins with "0XA;AT" and ends with "0XA;G0?\r\n", then it's a valid response
-  if (val.startsWith("0XA;AT") && val.endsWith("0XA;G0?\r\n")) {
+  // if it begins with "0XA;AT" and ends with "\r\n", then it's a valid response
+  if (val.startsWith("0XA;AT") && val.endsWith("\r\n")) {
     return val;
   } else {
+    // Serial.println(val);
     return "";
   }
 
@@ -220,7 +224,7 @@ void setup() {
   RS485.setDelays(preDelayBR, postDelayBR);
   
   // Enable data reception
-  RS485.receive();
+  // RS485.receive();
 
   // start SensorReadThread thread
   SensorReadThread.start(S700_array);
