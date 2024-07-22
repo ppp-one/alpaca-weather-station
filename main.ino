@@ -263,3 +263,8 @@ void loop(){
 
 // context info
 // https://github.com/lasselukkari/aWOT/blob/master/examples/RequestContext/RequestContext.ino
+
+// other sensors to add
+// https://lambermont.dyndns.org/astro/weatherstation/
+// https://www.davisinstruments.com/collections/add-on-sensors/products/anemometer-for-vantage-pro2-vantage-pro
+// Kemo M152K rain sensor
