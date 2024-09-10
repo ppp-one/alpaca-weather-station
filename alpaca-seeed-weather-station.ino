@@ -321,3 +321,5 @@ void loop(){
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./   
 // arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
+
+// ADD USER INPUT FOR THRESHOLDS, STORE IN EEPROM? Or something that can be read from cold boot
