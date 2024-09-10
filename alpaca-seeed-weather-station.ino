@@ -19,6 +19,9 @@ constexpr auto wordlen{ 9.6f };  // OR 10.0f depending on the channel configurat
 constexpr auto preDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 
+// isSafe
+bool isSafe = false;
+
 EthernetServer server(80);
 Application app;
 
@@ -82,7 +85,15 @@ void S700_array()
 
     digitalWrite(LED_BUILTIN, LOW);
 
+    // check if rainsensor is active, was reading 168 when active? Need to check with voltmeter
+    if (analogRead(A1) > 10) {
+      isSafe = false;
+    } else {
+      isSafe = true;
+    }
+
     rtos::ThisThread::sleep_for(250);
+
   }
 }
 
@@ -109,7 +120,7 @@ String readRS485() {
     }
   }
 
-  Serial.println(val);
+  // Serial.println(val);
 
   // if it begins with "0XA;AT" and ends with "\r\n", then it's a valid response
   if (val.startsWith("0XA;AT") && val.endsWith("\r\n")) {
@@ -124,49 +135,78 @@ String readRS485() {
 // define a handler function
 void endPoint(Request &req, Response &res) {
 
-  res.set("Content-Type", "text/html");
-  auto url = split(req.path(), '/', 3);
+  res.set("Content-Type", "application/json");
+  auto url = split(req.path(), '/', 5);
 
-  if (url == "temperature") {
+  uint32_t ClientID = 0;
+  uint32_t ClientTransactionID = 0;
 
-    res.print(vals[0]);
+  uint32_t ServerID = 0;
+  uint32_t ServerTransactionID = 0;
 
+  int32_t ErrorNumber = 0;
+  String ErrorMessage = "\"\"";
+
+  float Value;
+
+  char buffer[16]; // Adjust the buffer size as needed
+
+  if (req.query("ClientID", buffer, sizeof(buffer))) {
+    ClientID = strtoul(buffer, NULL, 10);
+  }
+
+  if (req.query("ClientTransactionID", buffer, sizeof(buffer))) {
+    ClientTransactionID = strtoul(buffer, NULL, 10);
+  }
+
+  if (url == "connected") {
+    Value = 1;
+  } else if (url == "issafe") {
+    Value = isSafe;
+  } else if (url == "temperature") {
+    Value = vals[0];
   } else if (url == "humidity") {
-
-    res.print(vals[1]);
-
+    Value = vals[1];
   } else if (url == "dewpoint") {
-
+    // TODO: check this okay
     // source?
     float B = (log(vals[1] / 100) + ((17.27 * vals[0]) / (237.3 + vals[0]))) / 17.27;
     float dewpoint = (237.3 * B) / (1 - B);
-    res.print(dewpoint);
-
+    Value = dewpoint;
   } else if (url == "pressure") {
-
-    res.print(vals[2]);
-
+    Value = vals[2];
   } else if (url == "windspeed") {
-
-    res.print(vals[9]);
-
+    Value = vals[9];
   } else if (url == "windgust") {
-
-    res.print(vals[8]);
-
+    Value = vals[8];
   } else if (url == "winddirection") {
-
-    res.print(vals[6]);
-
+    Value = vals[6];
   } else if (url == "rainrate") {
-
-    res.print(vals[12]);
-
+    Value = vals[12];
   } else {
-    
-    res.print("Invalid path");
-  
+    ErrorNumber = 1;
+    ErrorMessage = "\"Invalid path\"";
   }
+
+  res.print("{");
+  res.print("\"ClientID\": ");
+  res.print(ClientID);
+  res.print(", ");
+  res.print("\"ClientTransactionID\": ");
+  res.print(ClientTransactionID);
+  res.print(", ");
+  res.print("\"ServerID\": ");
+  res.print(ServerID);
+  res.print(", ");
+  res.print("\"ErrorNumber\": ");
+  res.print(ErrorNumber);
+  res.print(", ");
+  res.print("\"ErrorMessage\": ");
+  res.print(ErrorMessage);
+  res.print(", ");
+  res.print("\"Value\": ");
+  res.print(Value);
+  res.print("}");
 
 }
 
@@ -183,37 +223,47 @@ void setup() {
 
   pinMode(LED_BUILTIN, OUTPUT);
 
+  // for Kemo M152K rain sensor
+  // set pin A0 to HIGH
+  pinMode(A0, OUTPUT);
+  digitalWrite(A0, HIGH);
+  // set pin A1 to INPUT
+  pinMode(A1, INPUT);
+
   // mount the handler to the default router
   // app.use(&fillContext);
   app.get("/", &endPoint);
 
-  // app.get("/observingconditions/0/connected", &endPoint);
-  // app.put("/observingconditions/0/connected", &endPoint);
-  // app.get("/observingconditions/0/name", &endPoint);
-  // app.get("/observingconditions/0/driverversion", &endPoint);
+  app.get("/api/v1/safetymonitor/0/connected", &endPoint);
+  app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
 
-  app.get("/observingconditions/0/windspeed", &endPoint);
-  app.get("/observingconditions/0/windgust", &endPoint);
-  app.get("/observingconditions/0/winddirection", &endPoint);
 
-  app.get("/observingconditions/0/rainrate", &endPoint);
+  app.get("/api/v1/observingconditions/0/connected", &endPoint);
+  // app.get("/api/v1/observingconditions/0/name", &endPoint);
+  // app.get("/api/v1/observingconditions/0/driverversion", &endPoint);
 
-  app.get("/observingconditions/0/temperature", &endPoint);
-  app.get("/observingconditions/0/humidity", &endPoint);
-  app.get("/observingconditions/0/dewpoint", &endPoint);
-  app.get("/observingconditions/0/pressure", &endPoint);
+  app.get("/api/v1/observingconditions/0/windspeed", &endPoint);
+  app.get("/api/v1/observingconditions/0/windgust", &endPoint);
+  app.get("/api/v1/observingconditions/0/winddirection", &endPoint);
 
-  // app.get("/observingconditions/0/cloudcover", &endPoint);
-  // app.get("/observingconditions/0/skybrightness", &endPoint);
-  // app.get("/observingconditions/0/skyquality", &endPoint);
-  // app.get("/observingconditions/0/skytemperature", &endPoint);
-  // app.get("/observingconditions/0/starfwhm", &endPoint);
+  app.get("/api/v1/observingconditions/0/rainrate", &endPoint);
 
-  // app.get("/observingconditions/0/averageperiod", &endPoint);
-  // app.put("/observingconditions/0/averageperiod", &endPoint);
-  // app.put("/observingconditions/0/refresh", &endPoint);
-  // app.get("/observingconditions/0/sensordescription", &endPoint); 0XA; MD=?<CR><LF> 0XA; VE=?<CR><LF> 0XA; TP=?<CR><LF> 0XA; S/N=?<CR><LF> 0XA; NA=?<CR><LF>
-  // app.get("/observingconditions/0/timesincelastupdate", &endPoint);
+  app.get("/api/v1/observingconditions/0/temperature", &endPoint);
+  app.get("/api/v1/observingconditions/0/humidity", &endPoint);
+  app.get("/api/v1/observingconditions/0/dewpoint", &endPoint);
+  app.get("/api/v1/observingconditions/0/pressure", &endPoint);
+
+  // app.get("/api/v1/observingconditions/0/cloudcover", &endPoint);
+  // app.get("/api/v1/observingconditions/0/skybrightness", &endPoint);
+  // app.get("/api/v1/observingconditions/0/skyquality", &endPoint);
+  // app.get("/api/v1/observingconditions/0/skytemperature", &endPoint);
+  // app.get("/api/v1/observingconditions/0/starfwhm", &endPoint);
+
+  // app.get("/api/v1/observingconditions/0/averageperiod", &endPoint);
+  // app.put("/api/v1/observingconditions/0/averageperiod", &endPoint);
+  // app.put("/api/v1/observingconditions/0/refresh", &endPoint);
+  // app.get("/api/v1/observingconditions/0/sensordescription", &endPoint); 0XA; MD=?<CR><LF> 0XA; VE=?<CR><LF> 0XA; TP=?<CR><LF> 0XA; S/N=?<CR><LF> 0XA; NA=?<CR><LF>
+  // app.get("/api/v1/observingconditions/0/timesincelastupdate", &endPoint);
 
   // app.finally(&setStatus);
 
@@ -268,3 +318,6 @@ void loop(){
 // https://lambermont.dyndns.org/astro/weatherstation/
 // https://www.davisinstruments.com/collections/add-on-sensors/products/anemometer-for-vantage-pro2-vantage-pro
 // Kemo M152K rain sensor
+
+// arduino-cli compile --fqbn arduino:mbed_opta:opta ./   
+// arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
