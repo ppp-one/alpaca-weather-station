@@ -2,6 +2,8 @@
 #include <Ethernet.h>
 #include <aWOT.h>
 #include <cmath>
+#include <unordered_map>
+#include <string>
 
 static rtos::Thread SensorReadThread;
 float vals[16];
@@ -21,6 +23,52 @@ constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 
 // isSafe
 bool isSafe = false;
+
+// safety limits
+float AT_low = 0;
+float AT_high = 30;
+float AH_low = 0;
+float AH_high = 80;
+float AP_low = 90000;
+float AP_high = 100000;
+// add more later
+
+// S700 array
+// AT Air temperature C
+// AH Air humidity %RH
+// AP Barometric pressure Pa
+// LX Light intensity Lux
+// DN Minimum wind direction deg
+// Dm Maximum wind direction deg
+// DA Average wind direction deg
+// SN Minimum wind speed m/s (default), km/h, mph, knots
+// SM Maximum wind speed m/s (default), km/h, mph, knots
+// SA Average wind speed m/s (default), km/h, mph, knots
+// RA Accumulated rainfall mm (default), in
+// RD Duration of rainfall s
+// RI Rainfall intensity mm/h (default), in/h
+// Rp Maximum rainfall intensity mm/h (default), in/h
+// HT Heating temperature C
+// TILT Fall detection
+
+std::unordered_map<std::string, int> S700_key = {
+    {"AT", 0},
+    {"AH", 1},
+    {"AP", 2},
+    {"LX", 3},
+    {"DN", 4},
+    {"Dm", 5},
+    {"DA", 6},
+    {"SN", 7},
+    {"SM", 8},
+    {"SA", 9},
+    {"RA", 10},
+    {"RD", 11},
+    {"RI", 12},
+    {"Rp", 13},
+    {"HT", 14},
+    {"TILT", 15}
+};
 
 EthernetServer server(80);
 Application app;
@@ -44,21 +92,32 @@ String split(String data, char separator, int index)
 
 void S700_array()
 {
+  const unsigned long timeStale = 5000; // 5000 ms timeout
   char separator = ';';
+  auto lastData = rtos::Kernel::Clock::now();
+  auto timeSinceSafe = rtos::Kernel::Clock::now();
   while(1) {
+    if (!isSafe) {
+      digitalWrite(LED_D0, HIGH);
+    } else {
+      digitalWrite(LED_D0, LOW);
+    }
     digitalWrite(LED_BUILTIN, HIGH);
     String data = readRS485();
 
+
     if (data == "") {
-      Serial.println("No data");
+      if (rtos::Kernel::Clock::now() - lastData > std::chrono::milliseconds(timeStale)) {
+        Serial.println("No data received within timeout");
+        isSafe = false;
+      }
       rtos::ThisThread::sleep_for(1000);
-      // TODO: consider changing safety to 0 if it happens too often or data stale
       continue;
+    } else {
+      lastData = rtos::Kernel::Clock::now();
     }
 
-
     int valint = 0;
-
     int found = 0;
     int strIndex[] = {0, -1};
     int maxIndex = data.length()-1;
@@ -75,61 +134,94 @@ void S700_array()
         found=1;
 
         if (vi.length() > 2 && valint < 15) {
+          Serial.print(valint);
+          Serial.print(": ");
+          Serial.println(vi);
           vals[valint] = vi.substring(3).toFloat();
           valint++;
         }
       }
     }
 
-    rtos::ThisThread::sleep_for(250);
+    rtos::ThisThread::sleep_for(500);
 
     digitalWrite(LED_BUILTIN, LOW);
 
-    // check if rainsensor is active, was reading 168 when active? Need to check with voltmeter
-    if (analogRead(A1) > 10) {
-      isSafe = false;
-    } else {
-      isSafe = true;
-    }
+    // safety check
+    isSafe = safetyCheck(); // TODO: if false, make the isSafe stay false for a while
 
-    rtos::ThisThread::sleep_for(250);
+    rtos::ThisThread::sleep_for(500);
 
   }
 }
 
 String readRS485() {
-  String val = "";
+  const unsigned long timeout = 500; // 500 ms timeout
+  const int maxChars = 256; // Maximum characters to read
+  char buffer[maxChars + 1]; // +1 for null terminator
+  int charCount = 0;
+  auto startTime = rtos::Kernel::Clock::now();
+
 
   RS485.noReceive();
   RS485.beginTransmission();
   RS485.println("0XA;G0?");
-  RS485.endTransmission();
   RS485.flush();
+  RS485.endTransmission();
   RS485.receive();
 
-  if (RS485.available()) {
-    auto peeked = RS485.peek();
-    while (peeked != -1) {
-      char c;
-      uint8_t b = RS485.read();
-
-      c = (char)b;
-      val += c;
-
-      peeked = RS485.peek();
+  while (rtos::Kernel::Clock::now() - startTime < std::chrono::milliseconds(timeout)) {
+    if (RS485.available()) {
+      char c = RS485.read();
+      buffer[charCount++] = c;
+      if (c == '\n') {
+        break;
+      }
     }
   }
+  buffer[charCount] = '\0'; // Null-terminate the string
 
-  // Serial.println(val);
+  String val = String(buffer);
+  Serial.println(val);
 
-  // if it begins with "0XA;AT" and ends with "\r\n", then it's a valid response
-  if (val.startsWith("0XA;AT") && val.endsWith("\r\n")) {
-    return val;
-  } else {
-    // Serial.println(val);
+  if (charCount == 0) {
+    // Serial.println("No data received within timeout");
     return "";
   }
 
+  if (val.startsWith("0XA;AT") && val.endsWith("TILT=0\r\n")) {
+    return val;
+  } else {
+    Serial.println("Invalid response received");
+    return "";
+  }
+}
+
+bool safetyCheck() {
+  // check if any values are outside of the safety limits
+  // temperature
+  if (vals[S700_key["AT"]] < AT_low || vals[S700_key["AT"]] > AT_high) {
+    Serial.println("Temperature out of range");
+    return false;
+  }
+  // humidity
+  if (vals[S700_key["AH"]] < AH_low || vals[S700_key["AH"]] > AH_high) {
+    Serial.println("Humidity out of range");
+    return false;
+  }
+  // pressure
+  if (vals[S700_key["AP"]] < AP_low || vals[S700_key["AP"]] > AP_high) {
+    Serial.println("Pressure out of range");
+    return false;
+  }
+
+  // check if rainsensor is active, was reading 168 when active? Need to check with voltmeter
+  if (analogRead(A1) > 10) { // TODO: should this trigger an interrupt instead?
+    Serial.println("Rain detected");
+    return false;
+  }
+
+  return true;
 }
 
 // define a handler function
@@ -164,7 +256,7 @@ void endPoint(Request &req, Response &res) {
   } else if (url == "issafe") {
     Value = isSafe;
   } else if (url == "temperature") {
-    Value = vals[0];
+    Value = vals[S700_key["AT"]];
   } else if (url == "humidity") {
     Value = vals[1];
   } else if (url == "dewpoint") {
@@ -222,6 +314,7 @@ void setup() {
   }
 
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED_D0, OUTPUT);
 
   // for Kemo M152K rain sensor
   // set pin A0 to HIGH
@@ -272,9 +365,6 @@ void setup() {
   // RS485 init
   RS485.begin(baudrate);
   RS485.setDelays(preDelayBR, postDelayBR);
-  
-  // Enable data reception
-  // RS485.receive();
 
   // start SensorReadThread thread
   SensorReadThread.start(S700_array);
