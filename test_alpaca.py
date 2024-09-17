@@ -9,8 +9,9 @@ counter = 0
 for i in range(10):
     temperture = WS.Temperature
     humidity = WS.Humidity
+    rainrate = WS.RainRate
     counter += 1
 
-    print(datetime.now(), temperture, humidity, counter)
+    print(datetime.now(), temperture, humidity, rainrate, counter)
 
     # time.sleep(1)

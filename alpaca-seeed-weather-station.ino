@@ -26,12 +26,23 @@ bool is_safe = false;
 
 // safety limits
 int safety_false_time = 10; // Time in seconds to keep is_safe false if not safe
-float AT_low = 0;
-float AT_high = 30;
-float AH_low = 0;
-float AH_high = 80;
-float AP_low = 90000;
-float AP_high = 110000;
+float AT_low = 0; // Air temperature low limit C
+float AT_high = 30; // Air temperature high limit C
+float AH_low = 0; // Air humidity low limit %RH
+float AH_high = 80; // Air humidity high limit %RH
+float AP_low = 90000; // Barometric pressure low limit Pa
+float AP_high = 110000; // Barometric pressure high limit Pa
+float LX_high = 10000; // Light intensity high limit Lux
+float SM_high = 15; // Gust wind speed high limit m/s (default), km/h, mph, knots
+float SA_high = 15; // Average wind speed high limit m/s (default), km/h, mph, knots
+
+// These require user resetting (see manual)
+// float RA_high = 0; // Accumulated rainfall high limit mm (default), in
+// float RD_high = 0; // Duration of rainfall high limit s
+
+// Resets after an hour?
+float RI_high = 0; // Rainfall intensity high limit mm/h (default), in/h
+float Rp_high = 0; // Maximum rainfall intensity high limit mm/h (default), in/h
 // add more later
 
 // S700 array
@@ -180,6 +191,14 @@ bool read_weather_station() {
         found=1;
 
         if (vi.length() > 2 && valint < 15) {
+          Serial.print("valint: ");
+          Serial.print(valint);
+          Serial.print(" ");
+          Serial.print(vi);
+          Serial.print(" ");
+          Serial.println(vi.substring(3).toFloat());
+          
+
           vals[valint] = vi.substring(3).toFloat();
           valint++;
         }
@@ -208,6 +227,49 @@ bool safety_check() {
   // pressure
   if (vals[S700_key["AP"]] < AP_low || vals[S700_key["AP"]] > AP_high) {
     Serial.println("Pressure out of range");
+    return false;
+  }
+
+  // light intensity
+  if (vals[S700_key["LX"]] > LX_high) {
+    Serial.println("Light intensity out of range");
+    return false;
+  }
+
+  // gust wind speed
+  if (vals[S700_key["SM"]] > SM_high) {
+    Serial.println("Wind speed out of range");
+    return false;
+  }
+
+  // average wind speed
+  if (vals[S700_key["SA"]] > SA_high) {
+    Serial.println("Wind speed out of range");
+    return false;
+  }
+
+  // these require user resetting (see manual)
+  // accumulated rainfall
+  // if (vals[S700_key["RA"]] > RA_high) {
+  //   Serial.println("Rainfall out of range");
+  //   return false;
+  // }
+
+  // // duration of rainfall
+  // if (vals[S700_key["RD"]] > RD_high) {
+  //   Serial.println("Rainfall duration out of range");
+  //   return false;
+  // }
+
+  // rainfall intensity
+  if (vals[S700_key["RI"]] > RI_high) {
+    Serial.println("Rainfall intensity out of range");
+    return false;
+  }
+
+  // maximum rainfall intensity
+  if (vals[S700_key["Rp"]] > Rp_high) {
+    Serial.println("Rainfall intensity out of range");
     return false;
   }
 
@@ -392,7 +454,7 @@ void setup() {
   pinMode(A1, INPUT);
 
   // mount the handler to the default router
-  // app.use(&fillContext);
+  // app.use(&fillContext); // middleware
   app.get("/", &index);
   app.post("/submit", &submit);
 
@@ -427,7 +489,7 @@ void setup() {
   // app.get("/api/v1/observingconditions/0/sensordescription", &endPoint); 0XA; MD=?<CR><LF> 0XA; VE=?<CR><LF> 0XA; TP=?<CR><LF> 0XA; S/N=?<CR><LF> 0XA; NA=?<CR><LF>
   // app.get("/api/v1/observingconditions/0/timesincelastupdate", &endPoint);
 
-  // app.finally(&setStatus);
+  // app.finally(&setStatus); // middleware
 
   server.begin();
 
