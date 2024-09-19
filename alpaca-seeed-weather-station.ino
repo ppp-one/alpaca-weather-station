@@ -26,23 +26,23 @@ bool is_safe = false;
 
 // safety limits
 int safety_false_time = 10; // Time in seconds to keep is_safe false if not safe
-float AT_low = 0; // Air temperature low limit C
-float AT_high = 30; // Air temperature high limit C
-float AH_low = 0; // Air humidity low limit %RH
-float AH_high = 80; // Air humidity high limit %RH
-float AP_low = 90000; // Barometric pressure low limit Pa
-float AP_high = 110000; // Barometric pressure high limit Pa
-float LX_high = 10000; // Light intensity high limit Lux
-float SM_high = 15; // Gust wind speed high limit m/s (default), km/h, mph, knots
-float SA_high = 15; // Average wind speed high limit m/s (default), km/h, mph, knots
+float AT_min = 0; // Air temperature low limit C
+float AT_max = 30; // Air temperature high limit C
+float AH_min = 0; // Air humidity low limit %RH
+float AH_max = 80; // Air humidity high limit %RH
+// float AP_min = 90000; // Barometric pressure low limit Pa
+// float AP_max = 110000; // Barometric pressure high limit Pa
+float LX_max = 10000; // Light intensity high limit Lux
+float SM_max = 15; // Gust wind speed high limit m/s (default), km/h, mph, knots
+float SA_max = 15; // Average wind speed high limit m/s (default), km/h, mph, knots
 
 // These require user resetting (see manual)
-// float RA_high = 0; // Accumulated rainfall high limit mm (default), in
-// float RD_high = 0; // Duration of rainfall high limit s
+// float RA_max = 0; // Accumulated rainfall high limit mm (default), in
+// float RD_max = 0; // Duration of rainfall high limit s
 
 // Resets after an hour?
-float RI_high = 0; // Rainfall intensity high limit mm/h (default), in/h
-float Rp_high = 0; // Maximum rainfall intensity high limit mm/h (default), in/h
+float RI_max = 0; // Rainfall intensity high limit mm/h (default), in/h
+float Rp_max = 0; // Maximum rainfall intensity high limit mm/h (default), in/h
 // add more later
 
 // S700 array
@@ -215,60 +215,60 @@ bool read_weather_station() {
 bool safety_check() {
   // check if any values are outside of the safety limits
   // temperature
-  if (vals[S700_key["AT"]] < AT_low || vals[S700_key["AT"]] > AT_high) {
+  if (vals[S700_key["AT"]] < AT_min || vals[S700_key["AT"]] > AT_max) {
     Serial.println("Temperature out of range");
     return false;
   }
   // humidity
-  if (vals[S700_key["AH"]] < AH_low || vals[S700_key["AH"]] > AH_high) {
+  if (vals[S700_key["AH"]] < AH_min || vals[S700_key["AH"]] > AH_max) {
     Serial.println("Humidity out of range");
     return false;
   }
   // pressure
-  if (vals[S700_key["AP"]] < AP_low || vals[S700_key["AP"]] > AP_high) {
-    Serial.println("Pressure out of range");
-    return false;
-  }
+  // if (vals[S700_key["AP"]] < AP_min || vals[S700_key["AP"]] > AP_max) {
+  //   Serial.println("Pressure out of range");
+  //   return false;
+  // }
 
   // light intensity
-  if (vals[S700_key["LX"]] > LX_high) {
+  if (vals[S700_key["LX"]] > LX_max) {
     Serial.println("Light intensity out of range");
     return false;
   }
 
   // gust wind speed
-  if (vals[S700_key["SM"]] > SM_high) {
+  if (vals[S700_key["SM"]] > SM_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // average wind speed
-  if (vals[S700_key["SA"]] > SA_high) {
+  if (vals[S700_key["SA"]] > SA_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // these require user resetting (see manual)
-  // accumulated rainfall
-  // if (vals[S700_key["RA"]] > RA_high) {
+  // // accumulated rainfall
+  // if (vals[S700_key["RA"]] > RA_max) {
   //   Serial.println("Rainfall out of range");
   //   return false;
   // }
 
   // // duration of rainfall
-  // if (vals[S700_key["RD"]] > RD_high) {
+  // if (vals[S700_key["RD"]] > RD_max) {
   //   Serial.println("Rainfall duration out of range");
   //   return false;
   // }
 
   // rainfall intensity
-  if (vals[S700_key["RI"]] > RI_high) {
+  if (vals[S700_key["RI"]] > RI_max) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
 
   // maximum rainfall intensity
-  if (vals[S700_key["Rp"]] > Rp_high) {
+  if (vals[S700_key["Rp"]] > Rp_max) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
@@ -312,7 +312,7 @@ void endPoint(Request &req, Response &res) {
   } else if (url == "temperature") {
     Value = vals[S700_key["AT"]];
   } else if (url == "humidity") {
-    Value = vals[1];
+    Value = vals[S700_key["AH"]];
   } else if (url == "dewpoint") {
     // TODO: check this okay
     // source?
@@ -320,15 +320,15 @@ void endPoint(Request &req, Response &res) {
     float dewpoint = (237.3 * B) / (1 - B);
     Value = dewpoint;
   } else if (url == "pressure") {
-    Value = vals[2];
+    Value = vals[S700_key["AP"]];
   } else if (url == "windspeed") {
-    Value = vals[9];
+    Value = vals[S700_key["SA"]];
   } else if (url == "windgust") {
-    Value = vals[8];
+    Value = vals[S700_key["SM"]];
   } else if (url == "winddirection") {
-    Value = vals[6];
+    Value = vals[S700_key["DA"]];
   } else if (url == "rainrate") {
-    Value = vals[12];
+    Value = vals[S700_key["RI"]];
   } else {
     ErrorNumber = 1;
     ErrorMessage = "\"Invalid path\"";
@@ -364,40 +364,218 @@ void index(Request &req, Response &res) {
 
   res.set("Content-Type", "text/html; charset=utf-8");
 
-  String index_html = R"(
+  String index_html = R"~(
   <!DOCTYPE html>
   <html lang="en">
   <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Configure safety parameters</title>
+      <title>Safety limits</title>
+      <style>
+          body {
+              font-family: system-ui;
+              margin: 0;
+              padding: 0;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              height: 100vh;
+              background-color: #121212;
+              color: #fff;
+          }
+          .container {
+              padding: 20px;
+              border-radius: 8px;
+              box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+              width: 300px;
+              background-color: #1e1e1e;
+          }
+          h2 {
+              margin-top: 0;
+              font-size: large;
+              font-weight: 400;
+              color: #999999;
+          }
+          .form-group {
+              margin-bottom: 25px;
+              padding: 10px 0px;
+          }
+          .title {
+              display: flex; 
+              justify-content: space-between;
+              margin-bottom: 7px;
+          }
+          .property {
+              font-size: large;
+          }
+          .units {
+              font-size: small;
+              color: #999999;
+          }
+          .form-group label {
+              display: block;
+              margin-bottom: 5px;
+              font-size: small;
+              color: #999999;
+          }
+          .form-group input {
+              width: 100%;
+              padding: 8px;
+              box-sizing: border-box;
+          }
+          .form-group input[type="submit"] {
+              border: none;
+              cursor: pointer;
+              padding: 10px;
+              border-radius: 4px;
+              transition: background-color 0.3s, color 0.3s;
+              background-color: #93d4ff;
+              color: #000;
+          }
+          .form-group input[type="submit"]:hover {
+              opacity: 0.9;
+          }
+          .side-by-side {
+              display: flex;
+              justify-content: space-between;
+          }
+          .side-by-side > div {
+              flex: 1;
+          }
+          .side-by-side > div:first-child {
+              margin-right: 10px;
+          }
+      </style>
   </head>
   <body>
-      <h1>Configure safety parameters</h1>
-      <form action="/submit" method="post">
-          <label for="maxTemperature">Max temperature:</label>
-          <input type="number" name="maxTemperature" id="maxTemperature" value=")" + String(AT_high) + R"(" required>
-          <br>
-          <label for="minTemperature">Min temperature:</label>
-          <input type="number" name="minTemperature" id="minTemperature" value=")" + String(AT_low) + R"(" required>
-          <br>
-          <label for="maxHumidity">Max humidity:</label>
-          <input type="number" name="maxHumidity" id="maxHumidity" value=")" + String(AH_high) + R"(" required>
-          <br>
-          <label for="minHumidity">Min humidity:</label>
-          <input type="number" name="minHumidity" id="minHumidity" value=")" + String(AH_low) + R"(" required>
-          <br>
-          <label for="maxPressure">Max pressure:</label>
-          <input type="number" name="maxPressure" id="maxPressure" value=")" + String(AP_high) + R"(" required>
-          <br>
-          <label for="minPressure">Min pressure:</label>
-          <input type="number" name="minPressure" id="minPressure" value=")" + String(AP_low) + R"(" required>
-          <br>
-          <input type="submit" value="Submit">
-      </form>
+      <div class="container">
+          <h2>Safety limits 🧯</h2>
+          <form action="/submit" method="post" onsubmit="return validateForm()">
+
+              <!-- temperature limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Temperature</div>
+                      <div class="units">°C</div>
+                  </div>
+                  <div class="side-by-side">
+                      <div title="Current: )~" + String(AT_min) + R"~( °C">
+                          <label for="min-temp">Min</label>
+                          <input type="number" id="min-temp" name="min-temp" value=)~" + String(AT_min) + R"~( required>
+                      </div>
+                      <div title="Current: )~" + String(AT_max) + R"~( °C">
+                          <label for="max-temp">Max</label>
+                          <input type="number" id="max-temp" name="max-temp" value=)~" + String(AT_max) + R"~( required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- humidity limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Humidity</div>
+                      <div class="units">%</div>
+                  </div>
+                  <div class="side-by-side">
+                      <div title="Current: )~" + String(AH_min) + R"~( %">
+                          <label for="min-rh">Min</label>
+                          <input type="number" id="min-rh" name="min-rh" value=)~" + String(AH_min) + R"~( min=0 required>
+                      </div>
+                      <div title="Current: )~" + String(AH_max) + R"~( %">
+                          <label for="max-rh">Max</label>
+                          <input type="number" id="max-rh" name="max-rh" value=)~" + String(AH_max) + R"~( max=100 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- wind limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Wind</div>
+                      <div class="units">m/s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" + String(SA_max) + R"~( m/s">
+                          <label for="max-wind">Max</label>
+                          <input type="number" id="max-wind" name="max-wind" value=)~" + String(SA_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- gust wind limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Gust wind</div>
+                      <div class="units">m/s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" + String(SM_max) + R"~( m/s">
+                          <label for="max-gust-wind">Max</label>
+                          <input type="number" id="max-gust-wind" name="max-gust-wind" value=)~" + String(SM_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- light limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Light</div>
+                      <div class="units">lux</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" + String(LX_max) + R"~( lux">
+                          <label for="max-light">Max</label>
+                          <input type="number" id="max-light" name="max-light" value=)~" + String(LX_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- sky temperature -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Sky temperature (NOT USED)</div>
+                      <div class="units">°C</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: null °C">
+                          <label for="max-sky-temp">Max</label>
+                          <input type="number" id="max-sky-temp" name="max-sky-temp" value=-30 required>
+                      </div>
+                  </div>
+              </div>
+
+              <div class="form-group">
+                  <input type="submit" value="Submit">
+              </div>
+          </form>
+      </div>
   </body>
+  <script>
+      // on load, reset the form
+      window.onload = function() {
+          document.querySelector('form').reset();
+      }
+
+      function validateForm() {
+          const minTemp = document.getElementById('min-temp').value;
+          const maxTemp = document.getElementById('max-temp').value;
+          if (parseInt(minTemp) > parseInt(maxTemp)) {
+              alert('Min temperature cannot be greater than Max temperature.');
+              return false;
+          }
+
+          const minRH = document.getElementById('min-rh').value;
+          const maxRH = document.getElementById('max-rh').value;
+          if (parseInt(minRH) > parseInt(maxRH)) {
+              alert('Min humidity cannot be greater than Max humidity.');
+              return false;
+          }
+
+          return true;
+      }
+  </script>
   </html>
-  )";
+  )~";
 
   res.print(index_html);
 }
@@ -416,19 +594,21 @@ void submit(Request &req, Response &res) {
     res.print(":");
     res.println(value);
 
-    if (strcmp(name, "maxTemperature") == 0) {
-      AT_high = atof(value);
-    } else if (strcmp(name, "minTemperature") == 0) {
-      AT_low = atof(value);
-    } else if (strcmp(name, "maxHumidity") == 0) {
-      AH_high = atof(value);
-    } else if (strcmp(name, "minHumidity") == 0) {
-      AH_low = atof(value);
-    } else if (strcmp(name, "maxPressure") == 0) {
-      AP_high = atof(value);
-    } else if (strcmp(name, "minPressure") == 0) {
-      AP_low = atof(value);
-    }
+    if (strcmp(name, "max-temp") == 0) {
+      AT_max = atof(value);
+    } else if (strcmp(name, "min-temp") == 0) {
+      AT_min = atof(value);
+    } else if (strcmp(name, "max-rh") == 0) {
+      AH_max = atof(value);
+    } else if (strcmp(name, "min-rh") == 0) {
+      AH_min = atof(value);
+    } else if (strcmp(name, "max-light") == 0) {
+      LX_max = atof(value);
+    } else if (strcmp(name, "max-wind") == 0) {
+      SA_max = atof(value);
+    } else if (strcmp(name, "max-gust-wind") == 0) {
+      SM_max = atof(value);
+    } 
   }
 
 }
