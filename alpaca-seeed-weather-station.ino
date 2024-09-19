@@ -610,6 +610,55 @@ void submit(Request &req, Response &res) {
       SM_max = atof(value);
     } 
   }
+  
+  String header = R"~(
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Submitted safety limits</title>
+  </head>
+  <body>
+  )~";
+
+  String footer = R"~(
+  </body>
+  </html>
+  )~";
+
+  res.set("Content-Type", "text/html; charset=utf-8");
+  res.print("Settings updated");
+
+  // updated settings
+  res.print(header);
+
+  res.print("<h1>Updated safety limits</h1>");
+  res.print("<br>Temperature: ");
+  res.print(AT_min);
+  res.print(" - ");
+  res.print(AT_max);
+  res.print(" °C");
+
+  res.print("<br>Humidity: ");
+  res.print(AH_min);
+  res.print(" - ");
+  res.print(AH_max);
+  res.print(" %RH");
+
+  res.print("<br>Light: ");
+  res.print(LX_max);
+  res.print(" lux");
+
+  res.print("<br>Wind: ");
+  res.print(SA_max);
+  res.print(" m/s");
+
+  res.print("<br>Gust wind: ");
+  res.print(SM_max);
+  res.print(" m/s");
+
+  res.print(footer);
 
 }
 
