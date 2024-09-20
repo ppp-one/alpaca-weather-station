@@ -106,6 +106,7 @@ String split(String data, char separator, int index)
   return found>index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 
+// Read all sensors and sets safety flag - runs in a separate thread
 void readSensors()
 {
   auto time_since_not_safe = rtos::Kernel::Clock::now();
@@ -156,6 +157,7 @@ void readSensors()
   }
 }
 
+// Read data from the S700 weather station
 bool readWeatherStation() {
   const unsigned long timeout = 500; // 500 ms timeout
   const int maxChars = 256; // Maximum characters to read
@@ -209,12 +211,12 @@ bool readWeatherStation() {
         found=1;
 
         if (vi.length() > 2 && valint < 15) {
-          Serial.print("valint: ");
-          Serial.print(valint);
-          Serial.print(" ");
-          Serial.print(vi);
-          Serial.print(" ");
-          Serial.println(vi.substring(3).toFloat());
+          // Serial.print("valint: ");
+          // Serial.print(valint);
+          // Serial.print(" ");
+          // Serial.print(vi);
+          // Serial.print(" ");
+          // Serial.println(vi.substring(3).toFloat());
           
 
           vals[valint] = vi.substring(3).toFloat();
@@ -230,6 +232,7 @@ bool readWeatherStation() {
   }
 }
 
+// Safety check of weather station data and connected sensors
 bool safetyCheck() {
   // check if any values are outside of the safety limits
   // temperature
@@ -300,6 +303,7 @@ bool safetyCheck() {
   return true;
 }
 
+// Handle the endpoint requests
 void endPoint(Request &req, Response &res) {
 
   res.set("Content-Type", "application/json");
@@ -312,6 +316,7 @@ void endPoint(Request &req, Response &res) {
   uint32_t ServerTransactionID = 0; // TODO: what is this? increment?
 
   float Value;
+  String ValueString;
 
   char buffer[16]; // Adjust the buffer size as needed
 
@@ -325,6 +330,10 @@ void endPoint(Request &req, Response &res) {
 
   if (url == "connected") {
     Value = 1;
+  } else if (url == "name") {
+    ValueString = "Weather Station by PPP";
+  } else if (url == "driverversion") {
+    ValueString = "0.0.1";
   } else if (url == "issafe") {
     Value = isSafe;
   } else if (url == "temperature") {
@@ -339,6 +348,8 @@ void endPoint(Request &req, Response &res) {
     Value = dewpoint;
   } else if (url == "pressure") {
     Value = vals[s700Key["AP"]];
+  } else if (url == "skybrightness") {
+    Value = vals[s700Key["LX"]];
   } else if (url == "windspeed") {
     Value = vals[s700Key["SA"]];
   } else if (url == "windgust") {
@@ -369,7 +380,13 @@ void endPoint(Request &req, Response &res) {
   res.print(ErrorMessage);
   res.print(", ");
   res.print("\"Value\": ");
-  res.print(Value);
+  if (url == "name" || url == "driverversion") {
+    res.print("\"");
+    res.print(ValueString);
+    res.print("\"");
+  } else {
+    res.print(Value);
+  }
   res.print("}");
 
   // reset error
@@ -378,6 +395,7 @@ void endPoint(Request &req, Response &res) {
 
 }
 
+// Display the form for setting the safety limits
 void index(Request &req, Response &res) {
 
   res.set("Content-Type", "text/html; charset=utf-8");
@@ -612,6 +630,7 @@ void index(Request &req, Response &res) {
   res.print(index_html);
 }
 
+// Submit the safety limits form data
 void submit(Request &req, Response &res) {
 
   char name[32];
@@ -666,7 +685,6 @@ void submit(Request &req, Response &res) {
   )~";
 
   res.set("Content-Type", "text/html; charset=utf-8");
-  res.print("Settings updated");
 
   // updated settings
   res.print(header);
@@ -733,6 +751,7 @@ int setLimits(const char* key, WeatherLimits stats)
   return store.set(key, reinterpret_cast<uint8_t*>(&stats), sizeof(WeatherLimits), 0);  
 }
 
+// setup
 void setup() {
   
   Serial.begin(115200);
@@ -816,8 +835,8 @@ void setup() {
 
 
   app.get("/api/v1/observingconditions/0/connected", &endPoint);
-  // app.get("/api/v1/observingconditions/0/name", &endPoint);
-  // app.get("/api/v1/observingconditions/0/driverversion", &endPoint);
+  app.get("/api/v1/observingconditions/0/name", &endPoint);
+  app.get("/api/v1/observingconditions/0/driverversion", &endPoint);
 
   app.get("/api/v1/observingconditions/0/windspeed", &endPoint);
   app.get("/api/v1/observingconditions/0/windgust", &endPoint);
@@ -831,7 +850,7 @@ void setup() {
   app.get("/api/v1/observingconditions/0/pressure", &endPoint);
 
   // app.get("/api/v1/observingconditions/0/cloudcover", &endPoint);
-  // app.get("/api/v1/observingconditions/0/skybrightness", &endPoint);
+  app.get("/api/v1/observingconditions/0/skybrightness", &endPoint);
   // app.get("/api/v1/observingconditions/0/skyquality", &endPoint);
   // app.get("/api/v1/observingconditions/0/skytemperature", &endPoint);
   // app.get("/api/v1/observingconditions/0/starfwhm", &endPoint);
@@ -854,6 +873,7 @@ void setup() {
   SensorReadThread.start(readSensors);
 }
 
+// loop
 void loop(){
 
   EthernetClient client = server.available();
@@ -895,5 +915,3 @@ void loop(){
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./   
 // arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
-
-// ADD USER INPUT FOR THRESHOLDS, STORE IN EEPROM? Or something that can be read from cold boot
