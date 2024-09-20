@@ -5,6 +5,45 @@
 #include <unordered_map>
 #include <string>
 
+#include <FlashIAPBlockDevice.h>
+#include <TDBStore.h>
+
+using namespace mbed;
+
+// Get limits of the In Application Program (IAP) flash, ie. the internal MCU flash.
+#include "FlashIAPLimits.h"
+auto iapLimits { getFlashIAPLimits() };
+
+// Create a block device on the available space of the FlashIAP
+FlashIAPBlockDevice blockDevice(iapLimits.start_address, iapLimits.available_size);
+
+// Create a key-value store on the Flash IAP block device
+TDBStore store(&blockDevice);
+
+// struct for weather limits
+struct WeatherLimits {
+  float AT_min = 0; // Air temperature low limit C
+  float AT_max = 50; // Air temperature high limit C
+  float AH_min = 0; // Air humidity low limit %RH
+  float AH_max = 80; // Air humidity high limit %RH
+  // float AP_min; // Barometric pressure low limit Pa
+  // float AP_max; // Barometric pressure high limit Pa
+  float LX_max = 10000; // Light intensity high limit Lux
+  float SM_max = 20; // Gust wind speed high limit m/s (default), km/h, mph, knots
+  float SA_max = 15; // Average wind speed high limit m/s (default), km/h, mph, knots
+  // float RA_max; // Accumulated rainfall high limit mm (default), in
+  // float RD_max; // Duration of rainfall high limit s
+  // float RI_max; // Rainfall intensity high limit mm/h (default), in/h
+  // float Rp_max; // Maximum rainfall intensity high limit mm/h (default), in/h
+  int safety_false_duration = 10; // Time in seconds to keep isSafe false if not safe
+};
+
+// Current weather limits, to be updated during runtime or submitted via the web interface
+WeatherLimits currentLimits;
+
+// An example key name for the stats on the store
+const char limitsKey[] { "limits" };
+
 static rtos::Thread SensorReadThread;
 float vals[16];
 
@@ -21,32 +60,11 @@ constexpr auto wordlen{ 9.6f };  // OR 10.0f depending on the channel configurat
 constexpr auto preDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 
-// is_safe
-bool is_safe = false;
-
-// safety limits
-int safety_false_time = 10; // Time in seconds to keep is_safe false if not safe
-float AT_min = 0; // Air temperature low limit C
-float AT_max = 30; // Air temperature high limit C
-float AH_min = 0; // Air humidity low limit %RH
-float AH_max = 80; // Air humidity high limit %RH
-// float AP_min = 90000; // Barometric pressure low limit Pa
-// float AP_max = 110000; // Barometric pressure high limit Pa
-float LX_max = 10000; // Light intensity high limit Lux
-float SM_max = 15; // Gust wind speed high limit m/s (default), km/h, mph, knots
-float SA_max = 15; // Average wind speed high limit m/s (default), km/h, mph, knots
-
-// These require user resetting (see manual)
-// float RA_max = 0; // Accumulated rainfall high limit mm (default), in
-// float RD_max = 0; // Duration of rainfall high limit s
-
-// Resets after an hour?
-float RI_max = 0; // Rainfall intensity high limit mm/h (default), in/h
-float Rp_max = 0; // Maximum rainfall intensity high limit mm/h (default), in/h
-// add more later
+// isSafe
+bool isSafe = false;
 
 // S700 array
-std::unordered_map<std::string, int> S700_key = {
+std::unordered_map<std::string, int> s700Key = {
     {"AT", 0}, // AT Air temperature C
     {"AH", 1}, // AH Air humidity %RH
     {"AP", 2}, // AP Barometric pressure Pa
@@ -88,7 +106,7 @@ String split(String data, char separator, int index)
   return found>index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 
-void read_sensors()
+void readSensors()
 {
   auto time_since_not_safe = rtos::Kernel::Clock::now();
   bool weather_station_data_received = false;
@@ -100,32 +118,32 @@ void read_sensors()
     digitalWrite(LED_BUILTIN, HIGH);
 
     // read weather station data
-    weather_station_data_received = read_weather_station();
+    weather_station_data_received = readWeatherStation();
 
     // if no data received, try once more
     if (!weather_station_data_received) {
       rtos::ThisThread::sleep_for(1000);
-      weather_station_data_received = read_weather_station();
+      weather_station_data_received = readWeatherStation();
     }
 
     // safety check of weather station data
-    safety_check_received = safety_check();
+    safety_check_received = safetyCheck();
 
-    // set is_safe
-    is_safe = weather_station_data_received && safety_check_received;
+    // set isSafe
+    isSafe = weather_station_data_received && safety_check_received;
 
-    // if not safe, keep is_safe false for 10 s, but continue to read sensors
-    if (!is_safe) {
+    // if not safe, keep isSafe false for 10 s, but continue to read sensors
+    if (!isSafe) {
       time_since_not_safe = rtos::Kernel::Clock::now();
     }
-    if ((rtos::Kernel::Clock::now() - time_since_not_safe > std::chrono::seconds(safety_false_time)) && is_safe) {
-      is_safe = true;
+    if ((rtos::Kernel::Clock::now() - time_since_not_safe > std::chrono::seconds(currentLimits.safety_false_duration)) && isSafe) {
+      isSafe = true;
     } else {
-      is_safe = false;
+      isSafe = false;
     }
 
     // testing LED
-    if (!is_safe) {
+    if (!isSafe) {
       digitalWrite(LED_D0, HIGH);
     } else {
       digitalWrite(LED_D0, LOW);
@@ -138,7 +156,7 @@ void read_sensors()
   }
 }
 
-bool read_weather_station() {
+bool readWeatherStation() {
   const unsigned long timeout = 500; // 500 ms timeout
   const int maxChars = 256; // Maximum characters to read
   char buffer[maxChars + 1]; // +1 for null terminator
@@ -212,63 +230,63 @@ bool read_weather_station() {
   }
 }
 
-bool safety_check() {
+bool safetyCheck() {
   // check if any values are outside of the safety limits
   // temperature
-  if (vals[S700_key["AT"]] < AT_min || vals[S700_key["AT"]] > AT_max) {
+  if (vals[s700Key["AT"]] < currentLimits.AT_min || vals[s700Key["AT"]] > currentLimits.AT_max) {
     Serial.println("Temperature out of range");
     return false;
   }
   // humidity
-  if (vals[S700_key["AH"]] < AH_min || vals[S700_key["AH"]] > AH_max) {
+  if (vals[s700Key["AH"]] < currentLimits.AH_min || vals[s700Key["AH"]] > currentLimits.AH_max) {
     Serial.println("Humidity out of range");
     return false;
   }
   // pressure
-  // if (vals[S700_key["AP"]] < AP_min || vals[S700_key["AP"]] > AP_max) {
+  // if (vals[s700Key["AP"]] < currentLimits.AP_min || vals[s700Key["AP"]] > currentLimits.AP_max) {
   //   Serial.println("Pressure out of range");
   //   return false;
   // }
 
   // light intensity
-  if (vals[S700_key["LX"]] > LX_max) {
+  if (vals[s700Key["LX"]] > currentLimits.LX_max) {
     Serial.println("Light intensity out of range");
     return false;
   }
 
   // gust wind speed
-  if (vals[S700_key["SM"]] > SM_max) {
+  if (vals[s700Key["SM"]] > currentLimits.SM_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // average wind speed
-  if (vals[S700_key["SA"]] > SA_max) {
+  if (vals[s700Key["SA"]] > currentLimits.SA_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // these require user resetting (see manual)
   // // accumulated rainfall
-  // if (vals[S700_key["RA"]] > RA_max) {
+  // if (vals[s700Key["RA"]] > currentLimits.RA_max) {
   //   Serial.println("Rainfall out of range");
   //   return false;
   // }
 
   // // duration of rainfall
-  // if (vals[S700_key["RD"]] > RD_max) {
+  // if (vals[s700Key["RD"]] > currentLimits.RD_max) {
   //   Serial.println("Rainfall duration out of range");
   //   return false;
   // }
 
   // rainfall intensity
-  if (vals[S700_key["RI"]] > RI_max) {
+  if (vals[s700Key["RI"]] > 0) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
 
   // maximum rainfall intensity
-  if (vals[S700_key["Rp"]] > Rp_max) {
+  if (vals[s700Key["Rp"]] > 0) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
@@ -308,11 +326,11 @@ void endPoint(Request &req, Response &res) {
   if (url == "connected") {
     Value = 1;
   } else if (url == "issafe") {
-    Value = is_safe;
+    Value = isSafe;
   } else if (url == "temperature") {
-    Value = vals[S700_key["AT"]];
+    Value = vals[s700Key["AT"]];
   } else if (url == "humidity") {
-    Value = vals[S700_key["AH"]];
+    Value = vals[s700Key["AH"]];
   } else if (url == "dewpoint") {
     // TODO: check this okay
     // source?
@@ -320,15 +338,15 @@ void endPoint(Request &req, Response &res) {
     float dewpoint = (237.3 * B) / (1 - B);
     Value = dewpoint;
   } else if (url == "pressure") {
-    Value = vals[S700_key["AP"]];
+    Value = vals[s700Key["AP"]];
   } else if (url == "windspeed") {
-    Value = vals[S700_key["SA"]];
+    Value = vals[s700Key["SA"]];
   } else if (url == "windgust") {
-    Value = vals[S700_key["SM"]];
+    Value = vals[s700Key["SM"]];
   } else if (url == "winddirection") {
-    Value = vals[S700_key["DA"]];
+    Value = vals[s700Key["DA"]];
   } else if (url == "rainrate") {
-    Value = vals[S700_key["RI"]];
+    Value = vals[s700Key["RI"]];
   } else {
     ErrorNumber = 1;
     ErrorMessage = "\"Invalid path\"";
@@ -459,13 +477,13 @@ void index(Request &req, Response &res) {
                       <div class="units">°C</div>
                   </div>
                   <div class="side-by-side">
-                      <div title="Current: )~" + String(AT_min) + R"~( °C">
+                      <div title="Current: )~" + String(currentLimits.AT_min) + R"~( °C">
                           <label for="min-temp">Min</label>
-                          <input type="number" id="min-temp" name="min-temp" value=)~" + String(AT_min) + R"~( required>
+                          <input type="number" id="min-temp" name="min-temp" value=)~" + String(currentLimits.AT_min) + R"~( required>
                       </div>
-                      <div title="Current: )~" + String(AT_max) + R"~( °C">
+                      <div title="Current: )~" + String(currentLimits.AT_max) + R"~( °C">
                           <label for="max-temp">Max</label>
-                          <input type="number" id="max-temp" name="max-temp" value=)~" + String(AT_max) + R"~( required>
+                          <input type="number" id="max-temp" name="max-temp" value=)~" + String(currentLimits.AT_max) + R"~( required>
                       </div>
                   </div>
               </div>
@@ -477,13 +495,13 @@ void index(Request &req, Response &res) {
                       <div class="units">%</div>
                   </div>
                   <div class="side-by-side">
-                      <div title="Current: )~" + String(AH_min) + R"~( %">
+                      <div title="Current: )~" + String(currentLimits.AH_min) + R"~( %">
                           <label for="min-rh">Min</label>
-                          <input type="number" id="min-rh" name="min-rh" value=)~" + String(AH_min) + R"~( min=0 required>
+                          <input type="number" id="min-rh" name="min-rh" value=)~" + String(currentLimits.AH_min) + R"~( min=0 required>
                       </div>
-                      <div title="Current: )~" + String(AH_max) + R"~( %">
+                      <div title="Current: )~" + String(currentLimits.AH_max) + R"~( %">
                           <label for="max-rh">Max</label>
-                          <input type="number" id="max-rh" name="max-rh" value=)~" + String(AH_max) + R"~( max=100 required>
+                          <input type="number" id="max-rh" name="max-rh" value=)~" + String(currentLimits.AH_max) + R"~( max=100 required>
                       </div>
                   </div>
               </div>
@@ -495,9 +513,9 @@ void index(Request &req, Response &res) {
                       <div class="units">m/s</div>
                   </div>
                   <div class="">
-                      <div title="Current: )~" + String(SA_max) + R"~( m/s">
+                      <div title="Current: )~" + String(currentLimits.SA_max) + R"~( m/s">
                           <label for="max-wind">Max</label>
-                          <input type="number" id="max-wind" name="max-wind" value=)~" + String(SA_max) + R"~( min=0 required>
+                          <input type="number" id="max-wind" name="max-wind" value=)~" + String(currentLimits.SA_max) + R"~( min=0 required>
                       </div>
                   </div>
               </div>
@@ -509,9 +527,9 @@ void index(Request &req, Response &res) {
                       <div class="units">m/s</div>
                   </div>
                   <div class="">
-                      <div title="Current: )~" + String(SM_max) + R"~( m/s">
+                      <div title="Current: )~" + String(currentLimits.SM_max) + R"~( m/s">
                           <label for="max-gust-wind">Max</label>
-                          <input type="number" id="max-gust-wind" name="max-gust-wind" value=)~" + String(SM_max) + R"~( min=0 required>
+                          <input type="number" id="max-gust-wind" name="max-gust-wind" value=)~" + String(currentLimits.SM_max) + R"~( min=0 required>
                       </div>
                   </div>
               </div>
@@ -523,9 +541,9 @@ void index(Request &req, Response &res) {
                       <div class="units">lux</div>
                   </div>
                   <div class="">
-                      <div title="Current: )~" + String(LX_max) + R"~( lux">
+                      <div title="Current: )~" + String(currentLimits.LX_max) + R"~( lux">
                           <label for="max-light">Max</label>
-                          <input type="number" id="max-light" name="max-light" value=)~" + String(LX_max) + R"~( min=0 required>
+                          <input type="number" id="max-light" name="max-light" value=)~" + String(currentLimits.LX_max) + R"~( min=0 required>
                       </div>
                   </div>
               </div>
@@ -540,6 +558,20 @@ void index(Request &req, Response &res) {
                       <div title="Current: null °C">
                           <label for="max-sky-temp">Max</label>
                           <input type="number" id="max-sky-temp" name="max-sky-temp" value=-30 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- safety false duration -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Safety false duration</div>
+                      <div class="units">s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" + String(currentLimits.safety_false_duration) + R"~( s">
+                          <label for="safety-false-duration">Min</label>
+                          <input type="number" id="safety-false-duration" name="safety-false-duration" value=)~" + String(currentLimits.safety_false_duration) + R"~( min=0 required>
                       </div>
                   </div>
               </div>
@@ -590,25 +622,31 @@ void submit(Request &req, Response &res) {
       return res.sendStatus(400);
     }
 
-    res.print(name);
-    res.print(":");
-    res.println(value);
-
     if (strcmp(name, "max-temp") == 0) {
-      AT_max = atof(value);
+      currentLimits.AT_max = atof(value);
     } else if (strcmp(name, "min-temp") == 0) {
-      AT_min = atof(value);
+      currentLimits.AT_min = atof(value);
     } else if (strcmp(name, "max-rh") == 0) {
-      AH_max = atof(value);
+      currentLimits.AH_max = atof(value);
     } else if (strcmp(name, "min-rh") == 0) {
-      AH_min = atof(value);
+      currentLimits.AH_min = atof(value);
     } else if (strcmp(name, "max-light") == 0) {
-      LX_max = atof(value);
+      currentLimits.LX_max = atof(value);
     } else if (strcmp(name, "max-wind") == 0) {
-      SA_max = atof(value);
+      currentLimits.SA_max = atof(value);
     } else if (strcmp(name, "max-gust-wind") == 0) {
-      SM_max = atof(value);
-    } 
+      currentLimits.SM_max = atof(value);
+    } else if (strcmp(name, "safety-false-duration") == 0) {
+      currentLimits.safety_false_duration = atoi(value);
+    }
+  }
+
+  // Update the stats and save them to the store
+  auto result = setLimits(limitsKey, currentLimits);
+  
+  if (result != MBED_SUCCESS) {
+    Serial.println("Error while saving to key-value store");
+    while (true);
   }
   
   String header = R"~(
@@ -635,36 +673,72 @@ void submit(Request &req, Response &res) {
 
   res.print("<h1>Updated safety limits</h1>");
   res.print("<br>Temperature: ");
-  res.print(AT_min);
+  res.print(currentLimits.AT_min);
   res.print(" - ");
-  res.print(AT_max);
+  res.print(currentLimits.AT_max);
   res.print(" °C");
 
   res.print("<br>Humidity: ");
-  res.print(AH_min);
+  res.print(currentLimits.AH_min);
   res.print(" - ");
-  res.print(AH_max);
+  res.print(currentLimits.AH_max);
   res.print(" %RH");
 
   res.print("<br>Light: ");
-  res.print(LX_max);
+  res.print(currentLimits.LX_max);
   res.print(" lux");
 
   res.print("<br>Wind: ");
-  res.print(SA_max);
+  res.print(currentLimits.SA_max);
   res.print(" m/s");
 
   res.print("<br>Gust wind: ");
-  res.print(SM_max);
+  res.print(currentLimits.SM_max);
   res.print(" m/s");
+
+  res.print("<br>Safety false duration: ");
+  res.print(currentLimits.safety_false_duration);
+  res.print(" s");
 
   res.print(footer);
 
 }
 
+// Retrieve WeatherLimits from the key-value store
+int getLimits(const char* key, WeatherLimits* limits)
+{
+  // Retrieve key-value info
+  TDBStore::info_t info;
+  auto result = store.get_info(key, &info);
+
+  if (result == MBED_ERROR_ITEM_NOT_FOUND)
+    return result;
+
+  // Allocate space for the value
+  uint8_t buffer[info.size] {};
+  size_t actual_size;
+
+  // Get the value
+  result = store.get(key, buffer, sizeof(buffer), &actual_size);
+  if (result != MBED_SUCCESS)
+    return result;
+
+  memcpy(limits, buffer, sizeof(WeatherLimits));
+  return result;
+}
+
+// Store a WeatherLimits to the the key-value store
+int setLimits(const char* key, WeatherLimits stats)
+{
+  return store.set(key, reinterpret_cast<uint8_t*>(&stats), sizeof(WeatherLimits), 0);  
+}
+
 void setup() {
   
   Serial.begin(115200);
+
+  //  Wait for terminal to come up
+  delay(1000);
 
   if (Ethernet.begin(mac, ip)) {
     Serial.println(Ethernet.localIP());
@@ -672,6 +746,56 @@ void setup() {
     Serial.println("Ethernet failed");
   }
 
+  // Initialize the flash IAP block device and print the memory layout
+  blockDevice.init();  
+  Serial.print("FlashIAP block device size: ");
+  Serial.println(blockDevice.size());
+  Serial.print("FlashIAP block device read size: ");
+  Serial.println(blockDevice.get_read_size());
+  Serial.print("FlashIAP block device program size: ");
+  Serial.println(blockDevice.get_program_size());
+  Serial.print("FlashIAP block device erase size: ");
+  Serial.println(blockDevice.get_erase_size());
+  // Deinitialize the device
+  blockDevice.deinit();
+
+  // Initialize the key-value store
+  Serial.print("Initializing TDBStore: ");
+  auto result = store.init();
+  Serial.println(result == MBED_SUCCESS ? "OK" : "Failed");
+  if (result != MBED_SUCCESS)
+    while (true); // Stop the sketch if an error occurs
+
+  // Get previous run stats from the key-value store
+  Serial.println("Retrieving Limits");
+  result = getLimits(limitsKey, &currentLimits);
+
+  if (result == MBED_SUCCESS) {
+    Serial.println("Previous limits");
+    Serial.print("AT_min: ");
+    Serial.println(currentLimits.AT_min);
+    Serial.print("AT_max: ");
+    Serial.println(currentLimits.AT_max);
+    Serial.print("AH_min: ");
+    Serial.println(currentLimits.AH_min);
+    Serial.print("AH_max: ");
+    Serial.println(currentLimits.AH_max);
+    Serial.print("LX_max: ");
+    Serial.println(currentLimits.LX_max);
+    Serial.print("SM_max: ");
+    Serial.println(currentLimits.SM_max);
+    Serial.print("SA_max: ");
+    Serial.println(currentLimits.SA_max);
+    Serial.print("Safety false time: ");
+    Serial.println(currentLimits.safety_false_duration);
+  } else if (result == MBED_ERROR_ITEM_NOT_FOUND) {
+    Serial.println("No previous data was found.");
+  } else {
+    Serial.println("Error reading from key-value store.");
+    while (true);
+  }
+
+  // set pins for LEDs
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_D0, OUTPUT);
 
@@ -727,7 +851,7 @@ void setup() {
   RS485.setDelays(preDelayBR, postDelayBR);
 
   // start SensorReadThread thread
-  SensorReadThread.start(read_sensors);
+  SensorReadThread.start(readSensors);
 }
 
 void loop(){
