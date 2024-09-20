@@ -4,14 +4,14 @@
 #include <cmath>
 #include <unordered_map>
 #include <string>
-
 #include <FlashIAPBlockDevice.h>
+#include "FlashIAPLimits.h"
 #include <TDBStore.h>
 
 using namespace mbed;
 
+// For storing the safety limits
 // Get limits of the In Application Program (IAP) flash, ie. the internal MCU flash.
-#include "FlashIAPLimits.h"
 auto iapLimits { getFlashIAPLimits() };
 
 // Create a block device on the available space of the FlashIAP
@@ -44,14 +44,6 @@ WeatherLimits currentLimits;
 // An example key name for the stats on the store
 const char limitsKey[] { "limits" };
 
-static rtos::Thread SensorReadThread;
-float vals[16];
-
-// the media access control (ethernet hardware) address
-byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0x91, 0x69 };
-//the IP address
-byte ip[] = { 192, 168, 0, 12 };
-
 // RS485
 constexpr auto baudrate{ 9600 };
 // Calculate preDelay and postDelay in microseconds for stable RS-485 transmission
@@ -60,10 +52,13 @@ constexpr auto wordlen{ 9.6f };  // OR 10.0f depending on the channel configurat
 constexpr auto preDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
 
-// isSafe
-bool isSafe = false;
+// Thread for reading sensors
+static rtos::Thread SensorReadThread;
 
-// S700 array
+// S700 values
+float s700Values[16];
+
+// S700 key
 std::unordered_map<std::string, int> s700Key = {
     {"AT", 0}, // AT Air temperature C
     {"AH", 1}, // AH Air humidity %RH
@@ -83,9 +78,19 @@ std::unordered_map<std::string, int> s700Key = {
     {"TILT", 15} // TILT Fall detection
 };
 
+// isSafe
+bool isSafe = false;
+
+// Alpaca error handling
 int32_t ErrorNumber = 0;
 String ErrorMessage = "\"\"";
 
+// the media access control (ethernet hardware) address
+byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0x91, 0x69 };
+//the IP address
+byte ip[] = { 192, 168, 0, 12 };
+
+// Create an Ethernet server
 EthernetServer server(80);
 Application app;
 
@@ -219,7 +224,7 @@ bool readWeatherStation() {
           // Serial.println(vi.substring(3).toFloat());
           
 
-          vals[valint] = vi.substring(3).toFloat();
+          s700Values[valint] = vi.substring(3).toFloat();
           valint++;
         }
       }
@@ -236,60 +241,60 @@ bool readWeatherStation() {
 bool safetyCheck() {
   // check if any values are outside of the safety limits
   // temperature
-  if (vals[s700Key["AT"]] < currentLimits.AT_min || vals[s700Key["AT"]] > currentLimits.AT_max) {
+  if (s700Values[s700Key["AT"]] < currentLimits.AT_min || s700Values[s700Key["AT"]] > currentLimits.AT_max) {
     Serial.println("Temperature out of range");
     return false;
   }
   // humidity
-  if (vals[s700Key["AH"]] < currentLimits.AH_min || vals[s700Key["AH"]] > currentLimits.AH_max) {
+  if (s700Values[s700Key["AH"]] < currentLimits.AH_min || s700Values[s700Key["AH"]] > currentLimits.AH_max) {
     Serial.println("Humidity out of range");
     return false;
   }
   // pressure
-  // if (vals[s700Key["AP"]] < currentLimits.AP_min || vals[s700Key["AP"]] > currentLimits.AP_max) {
+  // if (s700Values[s700Key["AP"]] < currentLimits.AP_min || s700Values[s700Key["AP"]] > currentLimits.AP_max) {
   //   Serial.println("Pressure out of range");
   //   return false;
   // }
 
   // light intensity
-  if (vals[s700Key["LX"]] > currentLimits.LX_max) {
+  if (s700Values[s700Key["LX"]] > currentLimits.LX_max) {
     Serial.println("Light intensity out of range");
     return false;
   }
 
   // gust wind speed
-  if (vals[s700Key["SM"]] > currentLimits.SM_max) {
+  if (s700Values[s700Key["SM"]] > currentLimits.SM_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // average wind speed
-  if (vals[s700Key["SA"]] > currentLimits.SA_max) {
+  if (s700Values[s700Key["SA"]] > currentLimits.SA_max) {
     Serial.println("Wind speed out of range");
     return false;
   }
 
   // these require user resetting (see manual)
   // // accumulated rainfall
-  // if (vals[s700Key["RA"]] > currentLimits.RA_max) {
+  // if (s700Values[s700Key["RA"]] > currentLimits.RA_max) {
   //   Serial.println("Rainfall out of range");
   //   return false;
   // }
 
   // // duration of rainfall
-  // if (vals[s700Key["RD"]] > currentLimits.RD_max) {
+  // if (s700Values[s700Key["RD"]] > currentLimits.RD_max) {
   //   Serial.println("Rainfall duration out of range");
   //   return false;
   // }
 
   // rainfall intensity
-  if (vals[s700Key["RI"]] > 0) {
+  if (s700Values[s700Key["RI"]] > 0) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
 
   // maximum rainfall intensity
-  if (vals[s700Key["Rp"]] > 0) {
+  if (s700Values[s700Key["Rp"]] > 0) {
     Serial.println("Rainfall intensity out of range");
     return false;
   }
@@ -337,27 +342,27 @@ void endPoint(Request &req, Response &res) {
   } else if (url == "issafe") {
     Value = isSafe;
   } else if (url == "temperature") {
-    Value = vals[s700Key["AT"]];
+    Value = s700Values[s700Key["AT"]];
   } else if (url == "humidity") {
-    Value = vals[s700Key["AH"]];
+    Value = s700Values[s700Key["AH"]];
   } else if (url == "dewpoint") {
     // TODO: check this okay
     // source?
-    float B = (log(vals[1] / 100) + ((17.27 * vals[0]) / (237.3 + vals[0]))) / 17.27;
+    float B = (log(s700Values[1] / 100) + ((17.27 * s700Values[0]) / (237.3 + s700Values[0]))) / 17.27;
     float dewpoint = (237.3 * B) / (1 - B);
     Value = dewpoint;
   } else if (url == "pressure") {
-    Value = vals[s700Key["AP"]];
+    Value = s700Values[s700Key["AP"]];
   } else if (url == "skybrightness") {
-    Value = vals[s700Key["LX"]];
+    Value = s700Values[s700Key["LX"]];
   } else if (url == "windspeed") {
-    Value = vals[s700Key["SA"]];
+    Value = s700Values[s700Key["SA"]];
   } else if (url == "windgust") {
-    Value = vals[s700Key["SM"]];
+    Value = s700Values[s700Key["SM"]];
   } else if (url == "winddirection") {
-    Value = vals[s700Key["DA"]];
+    Value = s700Values[s700Key["DA"]];
   } else if (url == "rainrate") {
-    Value = vals[s700Key["RI"]];
+    Value = s700Values[s700Key["RI"]];
   } else {
     ErrorNumber = 1;
     ErrorMessage = "\"Invalid path\"";
@@ -912,6 +917,9 @@ void loop(){
 // https://lambermont.dyndns.org/astro/weatherstation/
 // https://www.davisinstruments.com/collections/add-on-sensors/products/anemometer-for-vantage-pro2-vantage-pro
 // Kemo M152K rain sensor
+
+// Creating a Flash-Optimized Key-Value Store
+// https://docs.arduino.cc/tutorials/portenta-h7/flash-optimized-key-value-store/
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./   
 // arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
