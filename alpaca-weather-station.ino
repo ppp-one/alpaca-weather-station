@@ -88,7 +88,7 @@ String ErrorMessage = "\"\"";
 // the media access control (ethernet hardware) address
 byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0x91, 0x69 };
 //the IP address
-byte ip[] = { 192, 168, 0, 12 };
+byte ip[] = { 192, 168, 1, 12 };
 
 // Create an Ethernet server
 EthernetServer server(80);
@@ -336,7 +336,7 @@ void endPoint(Request &req, Response &res) {
   if (url == "connected") {
     Value = 1;
   } else if (url == "name") {
-    ValueString = "Weather Station by PPP";
+    ValueString = "Weather Station and safety monitor by PPP"; // TODO: change this, add limits?
   } else if (url == "driverversion") {
     ValueString = "0.0.1";
   } else if (url == "issafe") {
@@ -837,7 +837,8 @@ void setup() {
 
   app.get("/api/v1/safetymonitor/0/connected", &endPoint);
   app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
-
+  app.get("/api/v1/safetymonitor/0/name", &endPoint);
+  app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
 
   app.get("/api/v1/observingconditions/0/connected", &endPoint);
   app.get("/api/v1/observingconditions/0/name", &endPoint);
