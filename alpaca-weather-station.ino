@@ -895,6 +895,10 @@ void setup()
       mac[i] = info->mac_address[i];
     }
   }
+#else
+  Serial.println("ERROR: MAC address not successfully set");
+  while (1)
+    ;
 #endif
 
   if (Ethernet.begin(mac, ip))
@@ -1069,5 +1073,4 @@ void loop()
 // arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
 
 // TODO:
-// - automatically get mac address (see example on opta website)
 // - would be nice if we could set the IP from the web interface
