@@ -81,6 +81,10 @@ std::unordered_map<std::string, int> s700Key = {
 // isSafe
 bool isSafe = false;
 
+// Rain sensor
+volatile bool rainSensor = true;
+constexpr int rainSensorPin = A2;
+
 // Alpaca error handling
 int32_t ErrorNumber = 0;
 String ErrorMessage = "\"\"";
@@ -93,6 +97,12 @@ byte ip[] = { 192, 168, 1, 12 };
 // Create an Ethernet server
 EthernetServer server(80);
 Application app;
+
+// ISR for fully closed sensor
+void rainSensorISR() {
+  rainSensor = digitalRead(rainSensorPin) == LOW;
+  Serial.println("Rain detection change");
+}
 
 String split(String data, char separator, int index)
 {
@@ -126,17 +136,11 @@ void readSensors()
     // read weather station data
     weather_station_data_received = readWeatherStation();
 
-    // if no data received, try once more
-    if (!weather_station_data_received) {
-      rtos::ThisThread::sleep_for(1000);
-      weather_station_data_received = readWeatherStation();
-    }
-
     // safety check of weather station data
     safety_check_received = safetyCheck();
 
     // set isSafe
-    isSafe = weather_station_data_received && safety_check_received;
+    isSafe = weather_station_data_received && safety_check_received && rainSensor;
 
     // if not safe, keep isSafe false for 10 s, but continue to read sensors
     if (!isSafe) {
@@ -155,9 +159,18 @@ void readSensors()
       digitalWrite(LED_D0, LOW);
     }
 
-    rtos::ThisThread::sleep_for(500);
-    digitalWrite(LED_BUILTIN, LOW);
-    rtos::ThisThread::sleep_for(500);
+    // if no data received
+    if (!weather_station_data_received) {
+      ErrorNumber = 1;
+      ErrorMessage = "\"No data received from weather station\"";
+    } else {
+      ErrorNumber = 0;
+      ErrorMessage = "\"\"";
+
+      rtos::ThisThread::sleep_for(500);
+      digitalWrite(LED_BUILTIN, LOW);
+      rtos::ThisThread::sleep_for(500);
+    }
 
   }
 }
@@ -299,12 +312,6 @@ bool safetyCheck() {
     return false;
   }
 
-  // check if rainsensor is active, was reading 168 when active? Need to check with voltmeter
-  if (analogRead(A1) > 10) { // TODO: should this trigger an interrupt instead?
-    Serial.println("Rain detected");
-    return false;
-  }
-
   return true;
 }
 
@@ -322,6 +329,7 @@ void endPoint(Request &req, Response &res) {
 
   float Value;
   String ValueString;
+  bool ValueBool;
 
   char buffer[16]; // Adjust the buffer size as needed
 
@@ -334,13 +342,13 @@ void endPoint(Request &req, Response &res) {
   }
 
   if (url == "connected") {
-    Value = 1;
+    ValueBool = true;
   } else if (url == "name") {
     ValueString = "Weather Station and safety monitor by PPP"; // TODO: change this, add limits?
   } else if (url == "driverversion") {
-    ValueString = "0.0.1";
+    ValueString = "0.0.2";
   } else if (url == "issafe") {
-    Value = isSafe;
+    ValueBool = isSafe;
   } else if (url == "temperature") {
     Value = s700Values[s700Key["AT"]];
   } else if (url == "humidity") {
@@ -352,7 +360,7 @@ void endPoint(Request &req, Response &res) {
     float dewpoint = (237.3 * B) / (1 - B);
     Value = dewpoint;
   } else if (url == "pressure") {
-    Value = s700Values[s700Key["AP"]];
+    Value = s700Values[s700Key["AP"]]/100;
   } else if (url == "skybrightness") {
     Value = s700Values[s700Key["LX"]];
   } else if (url == "windspeed") {
@@ -363,6 +371,9 @@ void endPoint(Request &req, Response &res) {
     Value = s700Values[s700Key["DA"]];
   } else if (url == "rainrate") {
     Value = s700Values[s700Key["RI"]];
+    if (!rainSensor) {
+      Value += 0.01; // add 0.01 mm/h if rain sensor is active since rainrate on the S700 is not that sensitive
+    }
   } else {
     ErrorNumber = 1;
     ErrorMessage = "\"Invalid path\"";
@@ -389,6 +400,8 @@ void endPoint(Request &req, Response &res) {
     res.print("\"");
     res.print(ValueString);
     res.print("\"");
+  } else if (url == "issafe" || url == "connected") {
+    res.print(ValueBool ? "true" : "false");
   } else {
     res.print(Value);
   }
@@ -824,11 +837,8 @@ void setup() {
   pinMode(LED_D0, OUTPUT);
 
   // for Kemo M152K rain sensor
-  // set pin A0 to HIGH
-  pinMode(A0, OUTPUT);
-  digitalWrite(A0, HIGH);
-  // set pin A1 to INPUT
-  pinMode(A1, INPUT);
+  pinMode(rainSensorPin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(rainSensorPin), rainSensorISR, CHANGE);
 
   // mount the handler to the default router
   // app.use(&fillContext); // middleware
@@ -836,11 +846,13 @@ void setup() {
   app.post("/submit", &submit);
 
   app.get("/api/v1/safetymonitor/0/connected", &endPoint);
+  app.put("/api/v1/safetymonitor/0/connected", &endPoint);
   app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
   app.get("/api/v1/safetymonitor/0/name", &endPoint);
   app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
 
   app.get("/api/v1/observingconditions/0/connected", &endPoint);
+  app.put("/api/v1/observingconditions/0/connected", &endPoint);
   app.get("/api/v1/observingconditions/0/name", &endPoint);
   app.get("/api/v1/observingconditions/0/driverversion", &endPoint);
 
@@ -924,3 +936,7 @@ void loop(){
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./   
 // arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
+
+// TODO:
+// - automatically get mac address (see example on opta website)
+// - would be nice if we could set the IP from the web interface
