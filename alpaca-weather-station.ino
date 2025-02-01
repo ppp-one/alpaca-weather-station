@@ -7,6 +7,10 @@
 #include <FlashIAPBlockDevice.h>
 #include "FlashIAPLimits.h"
 #include <TDBStore.h>
+#include "opta_info.h"
+
+OptaBoardInfo* info;
+OptaBoardInfo* boardInfo();
 
 using namespace mbed;
 
@@ -82,15 +86,15 @@ std::unordered_map<std::string, int> s700Key = {
 bool isSafe = false;
 
 // Rain sensor
-volatile bool rainSensor = true;
-constexpr int rainSensorPin = A2;
+volatile bool rainSensorSafe = true;
+constexpr int rainSensorSafePin = A2;
 
 // Alpaca error handling
 int32_t ErrorNumber = 0;
 String ErrorMessage = "\"\"";
 
 // the media access control (ethernet hardware) address
-byte mac[] = { 0xA8, 0x61, 0x0A, 0x50, 0x91, 0x69 };
+byte mac[6];
 //the IP address
 byte ip[] = { 192, 168, 1, 12 };
 
@@ -99,8 +103,8 @@ EthernetServer server(80);
 Application app;
 
 // ISR for fully closed sensor
-void rainSensorISR() {
-  rainSensor = digitalRead(rainSensorPin) == LOW;
+void rainSensorSafeISR() {
+  rainSensorSafe = digitalRead(rainSensorSafePin) == LOW;
   Serial.println("Rain detection change");
 }
 
@@ -140,7 +144,7 @@ void readSensors()
     safety_check_received = safetyCheck();
 
     // set isSafe
-    isSafe = weather_station_data_received && safety_check_received && rainSensor;
+    isSafe = weather_station_data_received && safety_check_received && rainSensorSafe;
 
     // if not safe, keep isSafe false for 10 s, but continue to read sensors
     if (!isSafe) {
@@ -371,7 +375,7 @@ void endPoint(Request &req, Response &res) {
     Value = s700Values[s700Key["DA"]];
   } else if (url == "rainrate") {
     Value = s700Values[s700Key["RI"]];
-    if (!rainSensor) {
+    if (!rainSensorSafe) {
       Value += 0.01; // add 0.01 mm/h if rain sensor is active since rainrate on the S700 is not that sensitive
     }
   } else {
@@ -777,6 +781,15 @@ void setup() {
   //  Wait for terminal to come up
   delay(1000);
 
+  #if defined(GET_OPTA_OTP_BOARD_INFO)
+    info = boardInfo();
+    if (info->magic == 0xB5) {
+      for (int i = 0; i < 6; i++) {
+        mac[i] = info->mac_address[i];
+      }
+    }
+  #endif
+
   if (Ethernet.begin(mac, ip)) {
     Serial.println(Ethernet.localIP());
   } else{
@@ -837,8 +850,8 @@ void setup() {
   pinMode(LED_D0, OUTPUT);
 
   // for Kemo M152K rain sensor
-  pinMode(rainSensorPin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(rainSensorPin), rainSensorISR, CHANGE);
+  pinMode(rainSensorSafePin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(rainSensorSafePin), rainSensorSafeISR, CHANGE);
 
   // mount the handler to the default router
   // app.use(&fillContext); // middleware
