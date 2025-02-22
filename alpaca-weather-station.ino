@@ -14,6 +14,8 @@ OptaBoardInfo *boardInfo();
 
 using namespace mbed;
 
+#define GET_OPTA_OTP_BOARD_INFO ;
+
 // For storing the safety limits
 // Get limits of the In Application Program (IAP) flash, ie. the internal MCU flash.
 auto iapLimits{getFlashIAPLimits()};
@@ -88,7 +90,8 @@ bool isSafe = false;
 
 // Rain sensor
 volatile bool rainSensorSafe = true;
-constexpr int rainSensorSafePin = A2;
+constexpr int rainSensorSafePin = A7;
+constexpr int rainSensorSignalHighPin = A6;
 
 // Alpaca error handling
 int32_t ErrorNumber = 0;
@@ -103,12 +106,12 @@ byte ip[] = {192, 168, 1, 12};
 EthernetServer server(80);
 Application app;
 
-// ISR for fully closed sensor
-void rainSensorSafeISR()
-{
-  rainSensorSafe = digitalRead(rainSensorSafePin) == LOW;
-  Serial.println("Rain detection change");
-}
+// ISR for fully closed sensor // update 22-02-2025 - pins don't like 12V?
+// void rainSensorSafeISR()
+// {
+//   rainSensorSafe = digitalRead(rainSensorSafePin) == LOW;
+//   Serial.println("Rain detection change");
+// }
 
 String split(String data, char separator, int index)
 {
@@ -149,7 +152,7 @@ void readSensors()
     safety_check_received = safetyCheck();
 
     // set isSafe
-    isSafe = weather_station_data_received && safety_check_received && rainSensorSafe;
+    isSafe = weather_station_data_received && safety_check_received; // && rainSensorSafe;
 
     // if not safe, keep isSafe false for 10 s, but continue to read sensors
     if (!isSafe)
@@ -282,74 +285,87 @@ bool readWeatherStation()
 // Safety check of weather station data and connected sensors
 bool safetyCheck()
 {
+  bool safe = true;
+  // rainSensorSafe
+  if (analogRead(rainSensorSafePin) > 10)
+  {
+    Serial.println("Rain sensor active");
+    rainSensorSafe = false;
+    safe = false;
+  }
+  else
+  {
+    rainSensorSafe = true;
+  }
+
   // check if any values are outside of the safety limits
   // temperature
   if (s700Values[s700Key["AT"]] < currentLimits.AT_min || s700Values[s700Key["AT"]] > currentLimits.AT_max)
   {
     Serial.println("Temperature out of range");
-    return false;
+    safe = false;
   }
   // humidity
   if (s700Values[s700Key["AH"]] < currentLimits.AH_min || s700Values[s700Key["AH"]] > currentLimits.AH_max)
   {
     Serial.println("Humidity out of range");
-    return false;
+    safe = false;
   }
   // pressure
   // if (s700Values[s700Key["AP"]] < currentLimits.AP_min || s700Values[s700Key["AP"]] > currentLimits.AP_max) {
   //   Serial.println("Pressure out of range");
-  //   return false;
+  //   safe = false;
   // }
 
   // light intensity
   if (s700Values[s700Key["LX"]] > currentLimits.LX_max)
   {
     Serial.println("Light intensity out of range");
-    return false;
+    safe = false;
   }
 
   // gust wind speed
   if (s700Values[s700Key["SM"]] > currentLimits.SM_max)
   {
     Serial.println("Wind speed out of range");
-    return false;
+    safe = false;
   }
 
   // average wind speed
   if (s700Values[s700Key["SA"]] > currentLimits.SA_max)
   {
     Serial.println("Wind speed out of range");
-    return false;
+    safe = false;
   }
 
   // these require user resetting (see manual)
   // // accumulated rainfall
   // if (s700Values[s700Key["RA"]] > currentLimits.RA_max) {
   //   Serial.println("Rainfall out of range");
-  //   return false;
+  //   safe = false;
   // }
 
   // // duration of rainfall
   // if (s700Values[s700Key["RD"]] > currentLimits.RD_max) {
   //   Serial.println("Rainfall duration out of range");
-  //   return false;
+  //   safe = false;
   // }
 
   // rainfall intensity
   if (s700Values[s700Key["RI"]] > 0)
   {
     Serial.println("Rainfall intensity out of range");
-    return false;
+    safe = false;
   }
 
   // maximum rainfall intensity
   if (s700Values[s700Key["Rp"]] > 0)
   {
     Serial.println("Rainfall intensity out of range");
-    return false;
+    safe = false;
   }
 
-  return true;
+  return safe;
 }
 
 // Handle the endpoint requests
@@ -972,7 +988,9 @@ void setup()
 
   // for Kemo M152K rain sensor
   pinMode(rainSensorSafePin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(rainSensorSafePin), rainSensorSafeISR, CHANGE);
+  pinMode(rainSensorSignalHighPin, OUTPUT);
+  digitalWrite(rainSensorSignalHighPin, HIGH);
+  // attachInterrupt(digitalPinToInterrupt(rainSensorSafePin), rainSensorSafeISR, CHANGE);
 
   // mount the handler to the default router
   // app.use(&fillContext); // middleware
