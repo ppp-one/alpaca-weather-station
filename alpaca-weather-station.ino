@@ -1,4 +1,5 @@
 #include <ArduinoRS485.h>
+#include <DFRobot_MLX90614.h>
 #include <Ethernet.h>
 #include <aWOT.h>
 #include <cmath>
@@ -42,6 +43,8 @@ struct WeatherLimits
   // float RD_max; // Duration of rainfall high limit s
   // float RI_max; // Rainfall intensity high limit mm/h (default), in/h
   // float Rp_max; // Maximum rainfall intensity high limit mm/h (default), in/h
+  float ST_min = -80;             // Sky temperature low limit C (not used)
+  float ST_max = -30;             // Sky temperature high limit C (not used)
   int safety_false_duration = 10; // Time in seconds to keep isSafe false if not safe
 };
 
@@ -92,6 +95,15 @@ bool isSafe = false;
 volatile bool rainSensorSafe = true;
 constexpr int rainSensorSafePin = A7;
 constexpr int rainSensorSignalHighPin = A6;
+
+// SkyTemperature sensor
+DFRobot_MLX90614_I2C mlx1(0x5A, &Wire, 11, 12); // I2C address is 0x5A
+DFRobot_MLX90614_I2C mlx2(0x5B, &Wire, 11, 12); // I2C address is 0x5B
+float skyTemperature;                           // Sky temperature in Celsius
+float mlx1SkyTemperature;                       // Sky temperature in Celsius
+float mlx2SkyTemperature;                       // Sky temperature in Celsius
+float mlx1AmbientTemperature;                   // Ambient temperature in Celsius
+float mlx2AmbientTemperature;                   // Ambient temperature in Celsius
 
 // Alpaca error handling
 int32_t ErrorNumber = 0;
@@ -147,6 +159,29 @@ void readSensors()
 
     // read weather station data
     weather_station_data_received = readWeatherStation();
+
+    // read sky temperature
+    mlx1SkyTemperature = mlx1.getObjectTempCelsius();
+    mlx2SkyTemperature = mlx2.getObjectTempCelsius();
+    mlx1AmbientTemperature = mlx1.getAmbientTempCelsius();
+    mlx2AmbientTemperature = mlx2.getAmbientTempCelsius();
+    skyTemperature = std::max(mlx1SkyTemperature, mlx2SkyTemperature); // max of both sensors
+    // print mlx1 and mlx2 temperatures, object and ambient
+    Serial.print("MLX1 - Object: ");
+    Serial.print(mlx1SkyTemperature);
+    Serial.print(" °C, Ambient: ");
+    Serial.print(mlx1AmbientTemperature);
+    Serial.print(" °C, ");
+    Serial.print("MLX2 - Object: ");
+    Serial.print(mlx2SkyTemperature);
+    Serial.print(" °C, Ambient: ");
+    Serial.print(mlx2AmbientTemperature);
+    Serial.println();
+
+    Serial.print("Sky temperature: ");
+    Serial.print(skyTemperature);
+    Serial.print(" °C");
+    Serial.println();
 
     // safety check of weather station data
     safety_check_received = safetyCheck();
@@ -228,6 +263,9 @@ bool readWeatherStation()
   buffer[charCount] = '\0'; // Null-terminate the string
 
   String val = String(buffer);
+  // DEV ^ comment above and uncomment below to simulate reading data from the S700 weather station
+  // charCount = 16;                                                                                                                                    // Simulate reading data from the S700 weather station
+  // String val = "0XA;AT=23.6;AH=56.4;AP=100819.1;LX=93.0;DN=0.0;DM=0.0;DA=0.0;SN=0.0;SM=0.0;SA=0.0;RA=1.4;RD=60.0;RI=0.0;RP=0.0;HT=-38.4;TILT=0\r\n"; // String(buffer);
 
   if (charCount == 0)
   {
@@ -365,6 +403,13 @@ bool safetyCheck()
     safe = false;
   }
 
+  // sky temperature
+  if (skyTemperature < currentLimits.ST_min || skyTemperature > currentLimits.ST_max)
+  {
+    Serial.println("Sky temperature out of range");
+    safe = false;
+  }
+
   return safe;
 }
 
@@ -457,6 +502,16 @@ void endPoint(Request &req, Response &res)
       Value += 0.01; // add 0.01 mm/h if rain sensor is active since rainrate on the S700 is not that sensitive
     }
   }
+  else if (url == "skytemperature")
+  {
+    Value = skyTemperature;
+  }
+  else if (url == "rawmlx")
+  {
+    ValueString = "{\"mlx1\": {\"object\": " + String(mlx1SkyTemperature) +
+                  ", \"ambient\": " + String(mlx1AmbientTemperature) + "}, \"mlx2\": {\"object\": " +
+                  String(mlx2SkyTemperature) + ", \"ambient\": " + String(mlx2AmbientTemperature) + "}}";
+  }
   else
   {
     ErrorNumber = 1;
@@ -485,6 +540,10 @@ void endPoint(Request &req, Response &res)
     res.print("\"");
     res.print(ValueString);
     res.print("\"");
+  }
+  else if (url == "rawmlx")
+  {
+    res.print(ValueString);
   }
   else if (url == "issafe" || url == "connected")
   {
@@ -690,13 +749,21 @@ void index(Request &req, Response &res)
               <!-- sky temperature -->
               <div class="form-group">
                   <div class="title">
-                      <div class="property">Sky temperature (NOT USED)</div>
+                      <div class="property">Sky temperature</div>
                       <div class="units">°C</div>
                   </div>
-                  <div class="">
-                      <div title="Current: null °C">
+                  <div class="side-by-side">
+                      <div title="Current: )~" +
+                      String(currentLimits.ST_min) + R"~( °C">
+                          <label for="min-sky-temp">Min</label>
+                          <input type="number" id="min-sky-temp" name="min-sky-temp" value=)~" +
+                      String(currentLimits.ST_min) + R"~( required>
+                      </div>
+                      <div title="Current: )~" +
+                      String(currentLimits.ST_max) + R"~( °C">
                           <label for="max-sky-temp">Max</label>
-                          <input type="number" id="max-sky-temp" name="max-sky-temp" value=-30 required>
+                          <input type="number" id="max-sky-temp" name="max-sky-temp" value=)~" +
+                      String(currentLimits.ST_max) + R"~( required>
                       </div>
                   </div>
               </div>
@@ -741,6 +808,13 @@ void index(Request &req, Response &res)
           const maxRH = document.getElementById('max-rh').value;
           if (parseInt(minRH) > parseInt(maxRH)) {
               alert('Min humidity cannot be greater than Max humidity.');
+              return false;
+          }
+
+          const minSkyTemp = document.getElementById('min-sky-temp').value;
+          const maxSkyTemp = document.getElementById('max-sky-temp').value;
+          if (parseInt(minSkyTemp) > parseInt(maxSkyTemp)) {
+              alert('Min sky temperature cannot be greater than Max sky temperature.');
               return false;
           }
 
@@ -794,6 +868,14 @@ void submit(Request &req, Response &res)
     else if (strcmp(name, "max-gust-wind") == 0)
     {
       currentLimits.SM_max = atof(value);
+    }
+    else if (strcmp(name, "min-sky-temp") == 0)
+    {
+      currentLimits.ST_min = atof(value);
+    }
+    else if (strcmp(name, "max-sky-temp") == 0)
+    {
+      currentLimits.ST_max = atof(value);
     }
     else if (strcmp(name, "safety-false-duration") == 0)
     {
@@ -856,6 +938,12 @@ void submit(Request &req, Response &res)
   res.print("<br>Gust wind: ");
   res.print(currentLimits.SM_max);
   res.print(" m/s");
+
+  res.print("<br>Sky temperature: ");
+  res.print(currentLimits.ST_min);
+  res.print(" - ");
+  res.print(currentLimits.ST_max);
+  res.print(" °C");
 
   res.print("<br>Safety false duration: ");
   res.print(currentLimits.safety_false_duration);
@@ -992,6 +1080,35 @@ void setup()
   digitalWrite(rainSensorSignalHighPin, HIGH);
   // attachInterrupt(digitalPinToInterrupt(rainSensorSafePin), rainSensorSafeISR, CHANGE);
 
+  // initialize the SkyTemperature sensor
+  while (NO_ERR != mlx1.begin())
+  {
+    Serial.println("Communication with device failed, please check connection");
+    delay(3000);
+  }
+
+  while (NO_ERR != mlx2.begin())
+  {
+    Serial.println("Communication with device failed, please check connection");
+    delay(3000);
+  }
+
+  /**
+   * adjust SkyTemperature MLX Sensor sleep mode
+   * mode select to enter or exit sleep mode, it's enter sleep mode by default
+   *      true is to enter sleep mode
+   *      false is to exit sleep mode (automatically exit sleep mode after power down and restart)
+   */
+  mlx1.enterSleepMode();
+  delay(50);
+  mlx1.enterSleepMode(false);
+  delay(200);
+
+  mlx2.enterSleepMode();
+  delay(50);
+  mlx2.enterSleepMode(false);
+  delay(200);
+
   // mount the handler to the default router
   // app.use(&fillContext); // middleware
   app.get("/", &index);
@@ -1022,7 +1139,8 @@ void setup()
   // app.get("/api/v1/observingconditions/0/cloudcover", &endPoint);
   app.get("/api/v1/observingconditions/0/skybrightness", &endPoint);
   // app.get("/api/v1/observingconditions/0/skyquality", &endPoint);
-  // app.get("/api/v1/observingconditions/0/skytemperature", &endPoint);
+  app.get("/api/v1/observingconditions/0/skytemperature", &endPoint);
+  app.get("/api/v1/observingconditions/0/rawmlx", &endPoint);
   // app.get("/api/v1/observingconditions/0/starfwhm", &endPoint);
 
   // app.get("/api/v1/observingconditions/0/averageperiod", &endPoint);

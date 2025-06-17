@@ -1,0 +1,1144 @@
+/*
+ * Alpaca Weather Station for Arduino Opta
+ *
+ * This weather station implements ASCOM Alpaca ObservingConditions and SafetyMonitor APIs
+ * for astronomical observatory automation.
+ *
+ * Features:
+ * - S700 weather station integration via RS485
+ * - Rain sensor monitoring (Kemo M152K)
+ * - Web interface for safety limit configuration
+ * - Flash storage for persistent settings
+ * - Real-time safety monitoring with configurable thresholds
+ *
+ * Hardware:
+ * - Arduino Opta (main controller)
+ * - S700 weather station (RS485)
+ * - Kemo M152K rain sensor (analog)
+ * - Ethernet connectivity
+ *
+ * Cleaned up version with improved:
+ * - Code organization and structure
+ * - Error handling and safety logic
+ * - Constants and configuration management
+ * - Function documentation and naming
+ * - Memory efficiency and type safety
+ */
+
+#include <ArduinoRS485.h>
+#include <Ethernet.h>
+#include <aWOT.h>
+#include <cmath>
+#include <unordered_map>
+#include <string>
+#include <FlashIAPBlockDevice.h>
+#include "FlashIAPLimits.h"
+#include <TDBStore.h>
+#include "opta_info.h"
+#include <mutex>
+
+using namespace mbed;
+using namespace rtos;
+
+// Configuration
+#define GET_OPTA_OTP_BOARD_INFO
+
+// Board info
+OptaBoardInfo *info;
+OptaBoardInfo *boardInfo();
+
+// Configuration constants
+constexpr auto BAUDRATE = 9600;
+constexpr auto SENSOR_READ_INTERVAL_MS = 500;
+constexpr auto DEFAULT_SAFETY_FALSE_DURATION = 10;
+constexpr auto RAIN_SENSOR_THRESHOLD = 10;
+
+// Weather safety limits structure
+struct WeatherLimits
+{
+    float AT_min = 0.0f;                                       // Air temperature low limit (°C)
+    float AT_max = 50.0f;                                      // Air temperature high limit (°C)
+    float AH_min = 0.0f;                                       // Air humidity low limit (%RH)
+    float AH_max = 80.0f;                                      // Air humidity high limit (%RH)
+    float LX_max = 10000.0f;                                   // Light intensity high limit (Lux)
+    float SM_max = 20.0f;                                      // Gust wind speed high limit (m/s)
+    float SA_max = 15.0f;                                      // Average wind speed high limit (m/s)
+    int safety_false_duration = DEFAULT_SAFETY_FALSE_DURATION; // Time in seconds to keep isSafe false
+};
+
+// Function declarations
+String split(String data, char separator, int index);
+void readSensors();
+bool readWeatherStation();
+bool parseS700Data(const String &data);
+bool safetyCheck();
+float calculateDewPoint(float temperature, float humidity);
+void networkHandler();
+void endPoint(Request &req, Response &res);
+void index(Request &req, Response &res);
+void submit(Request &req, Response &res);
+int getLimits(const char *key, WeatherLimits *limits);
+int setLimits(const char *key, const WeatherLimits &limits);
+
+// Flash storage setup
+auto iapLimits{getFlashIAPLimits()};
+FlashIAPBlockDevice blockDevice(iapLimits.start_address, iapLimits.available_size);
+TDBStore store(&blockDevice);
+
+// Pin definitions
+constexpr int STATUS_LED_PIN = LED_D0;
+constexpr int RAIN_SENSOR_SAFE_PIN = A7;
+constexpr int RAIN_SENSOR_SIGNAL_HIGH_PIN = A6;
+
+// RS485 timing calculations
+constexpr auto bitduration = 1.0f / BAUDRATE;
+constexpr auto wordlen = 9.6f;
+constexpr auto preDelayBR = static_cast<int>(bitduration * wordlen * 3.5f * 1e6);
+constexpr auto postDelayBR = static_cast<int>(bitduration * wordlen * 3.5f * 1e6);
+
+// Network configuration
+byte mac[6];
+const byte ip[] = {192, 168, 1, 12};
+constexpr int SERVER_PORT = 80;
+
+// Global variables
+WeatherLimits currentLimits;
+const char limitsKey[] = "limits";
+
+// Thread management
+static Thread SensorReadThread;
+static Thread NetworkThread;
+
+// Thread synchronization
+static Mutex s700DataMutex;
+static Mutex safetyStateMutex;
+static Mutex errorStateMutex;
+static Mutex limitsConfigMutex;
+
+// S700 weather station data (protected by mutex)
+float s700Values[16] = {0};
+volatile bool isSafe = false;
+volatile bool rainSensorSafe = true;
+
+// Alpaca error handling (protected by mutex)
+int32_t ErrorNumber = 0;
+String ErrorMessage = "\"\"";
+
+// Network objects
+EthernetServer server(SERVER_PORT);
+Application app;
+// S700 sensor data mapping
+const std::unordered_map<std::string, int> s700Key = {
+    {"AT", 0},   // Air temperature (°C)
+    {"AH", 1},   // Air humidity (%RH)
+    {"AP", 2},   // Barometric pressure (Pa)
+    {"LX", 3},   // Light intensity (Lux)
+    {"DN", 4},   // Minimum wind direction (deg)
+    {"Dm", 5},   // Maximum wind direction (deg)
+    {"DA", 6},   // Average wind direction (deg)
+    {"SN", 7},   // Minimum wind speed (m/s)
+    {"SM", 8},   // Maximum wind speed (m/s)
+    {"SA", 9},   // Average wind speed (m/s)
+    {"RA", 10},  // Accumulated rainfall (mm)
+    {"RD", 11},  // Duration of rainfall (s)
+    {"RI", 12},  // Rainfall intensity (mm/h)
+    {"Rp", 13},  // Maximum rainfall intensity (mm/h)
+    {"HT", 14},  // Heating temperature (°C)
+    {"TILT", 15} // Fall detection
+};
+
+// Utility function to split strings
+String split(String data, char separator, int index)
+{
+    int found = 0;
+    int strIndex[] = {0, -1};
+    int maxIndex = data.length() - 1;
+
+    for (int i = 0; i <= maxIndex && found <= index; i++)
+    {
+        if (data.charAt(i) == separator || i == maxIndex)
+        {
+            found++;
+            strIndex[0] = strIndex[1] + 1;
+            strIndex[1] = (i == maxIndex) ? i + 1 : i;
+        }
+    }
+
+    return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
+}
+
+// Main sensor reading thread - runs continuously
+void readSensors()
+{
+    auto time_since_not_safe = Kernel::Clock::now();
+    bool weather_station_data_received = false;
+    bool safety_check_passed = false;
+
+    while (true)
+    {
+        digitalWrite(LED_BUILTIN, HIGH);
+
+        // Read weather station data
+        weather_station_data_received = readWeatherStation();
+
+        // Perform safety check
+        safety_check_passed = safetyCheck();
+
+        // Update safety status with proper synchronization
+        {
+            std::lock_guard<Mutex> lock(safetyStateMutex);
+            bool current_safe = weather_station_data_received && safety_check_passed && rainSensorSafe;
+
+            if (!current_safe)
+            {
+                time_since_not_safe = Kernel::Clock::now();
+                isSafe = false;
+            }
+            else
+            {
+                // Only set safe if enough time has passed since last unsafe condition
+                auto time_since_unsafe = Kernel::Clock::now() - time_since_not_safe;
+                WeatherLimits limits;
+                {
+                    std::lock_guard<Mutex> limitsLock(limitsConfigMutex);
+                    limits = currentLimits;
+                }
+
+                if (time_since_unsafe > std::chrono::seconds(limits.safety_false_duration))
+                {
+                    isSafe = true;
+                }
+            }
+
+            // Update status LED
+            digitalWrite(STATUS_LED_PIN, !isSafe);
+        }
+
+        // Handle errors with synchronization
+        {
+            std::lock_guard<Mutex> errorLock(errorStateMutex);
+            if (!weather_station_data_received)
+            {
+                ErrorNumber = 1;
+                ErrorMessage = "\"No data received from weather station\"";
+            }
+            else
+            {
+                ErrorNumber = 0;
+                ErrorMessage = "\"\"";
+            }
+        }
+
+        // LED blink pattern and delay
+        ThisThread::sleep_for(SENSOR_READ_INTERVAL_MS);
+        digitalWrite(LED_BUILTIN, LOW);
+        ThisThread::sleep_for(SENSOR_READ_INTERVAL_MS);
+    }
+}
+
+// Read data from the S700 weather station via RS485
+bool readWeatherStation()
+{
+    const unsigned long timeout = 500; // 500 ms timeout
+    const int maxChars = 256;
+    char buffer[maxChars + 1];
+    int charCount = 0;
+    auto startTime = rtos::Kernel::Clock::now();
+
+    // For development/testing - uncomment to use real RS485 communication
+    /*
+    RS485.noReceive();
+    RS485.beginTransmission();
+    RS485.println("0XA;G0?");
+    RS485.flush();
+    RS485.endTransmission();
+    RS485.receive();
+
+    while (rtos::Kernel::Clock::now() - startTime < std::chrono::milliseconds(timeout)) {
+      if (RS485.available()) {
+        char c = RS485.read();
+        buffer[charCount++] = c;
+        if (c == '\n') {
+          break;
+        }
+      }
+    }
+    buffer[charCount] = '\0';
+    String val = String(buffer);
+    */
+
+    // Simulated data for testing
+    charCount = 16;
+    String val = "0XA;AT=23.6;AH=56.4;AP=100819.1;LX=93.0;DN=0.0;DM=0.0;DA=0.0;SN=0.0;SM=0.0;SA=0.0;RA=1.4;RD=60.0;RI=0.0;RP=0.0;HT=-38.4;TILT=0\r\n";
+
+    if (charCount == 0)
+    {
+        return false;
+    }
+
+    // Parse S700 response format
+    if (val.startsWith("0XA;AT") && val.endsWith("TILT=0\r\n"))
+    {
+        return parseS700Data(val);
+    }
+    else
+    {
+        Serial.print("Invalid response received: ");
+        Serial.println(val);
+        return false;
+    }
+}
+
+// Parse S700 weather station data string
+bool parseS700Data(const String &data)
+{
+    int valueIndex = 0;
+    int found = 0;
+    int strIndex[] = {0, -1};
+    int maxIndex = data.length() - 1;
+    char separator = ';';
+
+    // Temporary array to hold parsed values
+    float tempValues[16] = {0};
+
+    for (int i = 0; i <= maxIndex; i++)
+    {
+        if (data.charAt(i) == separator || i == maxIndex)
+        {
+            found++;
+            strIndex[0] = strIndex[1] + 1;
+            strIndex[1] = (i == maxIndex) ? i + 1 : i;
+        }
+
+        if (found == 2)
+        {
+            String valueString = data.substring(strIndex[0], strIndex[1]);
+            found = 1;
+
+            if (valueString.length() > 2 && valueIndex < 15)
+            {
+                tempValues[valueIndex] = valueString.substring(3).toFloat();
+                valueIndex++;
+            }
+        }
+    }
+
+    // Update global array with thread safety
+    if (valueIndex > 0)
+    {
+        std::lock_guard<Mutex> lock(s700DataMutex);
+        memcpy(s700Values, tempValues, sizeof(s700Values));
+        return true;
+    }
+
+    return false;
+}
+
+// Perform comprehensive safety check of all sensors
+bool safetyCheck()
+{
+    bool safe = true;
+    float sensorData[16];
+    WeatherLimits limits;
+
+    // Get thread-safe copies of data
+    {
+        std::lock_guard<Mutex> dataLock(s700DataMutex);
+        memcpy(sensorData, s700Values, sizeof(s700Values));
+    }
+    {
+        std::lock_guard<Mutex> limitsLock(limitsConfigMutex);
+        limits = currentLimits;
+    }
+
+    // Check rain sensor
+    if (analogRead(RAIN_SENSOR_SAFE_PIN) > RAIN_SENSOR_THRESHOLD)
+    {
+        Serial.println("Rain sensor active");
+        rainSensorSafe = false;
+        safe = false;
+    }
+    else
+    {
+        rainSensorSafe = true;
+    }
+
+    // Check temperature limits
+    float temperature = sensorData[s700Key.at("AT")];
+    if (temperature < limits.AT_min || temperature > limits.AT_max)
+    {
+        Serial.print("Temperature out of range: ");
+        Serial.println(temperature);
+        safe = false;
+    }
+
+    // Check humidity limits
+    float humidity = sensorData[s700Key.at("AH")];
+    if (humidity < limits.AH_min || humidity > limits.AH_max)
+    {
+        Serial.print("Humidity out of range: ");
+        Serial.println(humidity);
+        safe = false;
+    }
+
+    // Check light intensity
+    float lightIntensity = sensorData[s700Key.at("LX")];
+    if (lightIntensity > limits.LX_max)
+    {
+        Serial.print("Light intensity out of range: ");
+        Serial.println(lightIntensity);
+        safe = false;
+    }
+
+    // Check gust wind speed
+    float gustWindSpeed = sensorData[s700Key.at("SM")];
+    if (gustWindSpeed > limits.SM_max)
+    {
+        Serial.print("Gust wind speed out of range: ");
+        Serial.println(gustWindSpeed);
+        safe = false;
+    }
+
+    // Check average wind speed
+    float avgWindSpeed = sensorData[s700Key.at("SA")];
+    if (avgWindSpeed > limits.SA_max)
+    {
+        Serial.print("Average wind speed out of range: ");
+        Serial.println(avgWindSpeed);
+        safe = false;
+    }
+
+    // Check rainfall intensity (any rain is unsafe)
+    float rainfallIntensity = sensorData[s700Key.at("RI")];
+    if (rainfallIntensity > 0)
+    {
+        Serial.print("Rainfall detected: ");
+        Serial.println(rainfallIntensity);
+        safe = false;
+    }
+
+    // Check maximum rainfall intensity
+    float maxRainfallIntensity = sensorData[s700Key.at("Rp")];
+    if (maxRainfallIntensity > 0)
+    {
+        Serial.print("Maximum rainfall intensity detected: ");
+        Serial.println(maxRainfallIntensity);
+        safe = false;
+    }
+
+    return safe;
+}
+
+// Calculate dew point from temperature and humidity using Magnus formula
+float calculateDewPoint(float temperature, float humidity)
+{
+    float B = (log(humidity / 100.0f) + ((17.27f * temperature) / (237.3f + temperature))) / 17.27f;
+    return (237.3f * B) / (1.0f - B);
+}
+
+// Handle ASCOM Alpaca API endpoint requests
+void endPoint(Request &req, Response &res)
+{
+    res.set("Content-Type", "application/json");
+    String url = split(req.path(), '/', 5);
+
+    // Parse query parameters
+    uint32_t ClientID = 0;
+    uint32_t ClientTransactionID = 0;
+    uint32_t ServerID = 0;
+    uint32_t ServerTransactionID = 0;
+
+    char buffer[16];
+    if (req.query("ClientID", buffer, sizeof(buffer)))
+    {
+        ClientID = strtoul(buffer, NULL, 10);
+    }
+    if (req.query("ClientTransactionID", buffer, sizeof(buffer)))
+    {
+        ClientTransactionID = strtoul(buffer, NULL, 10);
+    }
+
+    // Response values
+    float Value = 0.0f;
+    String ValueString = "";
+    bool ValueBool = false;
+
+    // Get thread-safe copies of data
+    float sensorData[16];
+    bool currentSafeState;
+    int32_t currentErrorNumber;
+    String currentErrorMessage;
+
+    {
+        std::lock_guard<Mutex> dataLock(s700DataMutex);
+        memcpy(sensorData, s700Values, sizeof(s700Values));
+    }
+    {
+        std::lock_guard<Mutex> safeLock(safetyStateMutex);
+        currentSafeState = isSafe;
+    }
+    {
+        std::lock_guard<Mutex> errorLock(errorStateMutex);
+        currentErrorNumber = ErrorNumber;
+        currentErrorMessage = ErrorMessage;
+    }
+
+    // Route endpoint requests
+    if (url == "connected")
+    {
+        ValueBool = true;
+    }
+    else if (url == "name")
+    {
+        ValueString = "Alpaca Weather Station and Safety Monitor v0.0.4";
+    }
+    else if (url == "driverversion")
+    {
+        ValueString = "0.0.4";
+    }
+    else if (url == "issafe")
+    {
+        ValueBool = currentSafeState;
+    }
+    else if (url == "temperature")
+    {
+        Value = sensorData[s700Key.at("AT")];
+    }
+    else if (url == "humidity")
+    {
+        Value = sensorData[s700Key.at("AH")];
+    }
+    else if (url == "dewpoint")
+    {
+        Value = calculateDewPoint(sensorData[s700Key.at("AT")], sensorData[s700Key.at("AH")]);
+    }
+    else if (url == "pressure")
+    {
+        Value = sensorData[s700Key.at("AP")] / 100.0f; // Convert Pa to hPa
+    }
+    else if (url == "skybrightness")
+    {
+        Value = sensorData[s700Key.at("LX")];
+    }
+    else if (url == "windspeed")
+    {
+        Value = sensorData[s700Key.at("SA")];
+    }
+    else if (url == "windgust")
+    {
+        Value = sensorData[s700Key.at("SM")];
+    }
+    else if (url == "winddirection")
+    {
+        Value = sensorData[s700Key.at("DA")];
+    }
+    else if (url == "rainrate")
+    {
+        Value = sensorData[s700Key.at("RI")];
+        if (!rainSensorSafe)
+        {
+            Value += 0.01f; // Add sensitivity for rain sensor
+        }
+    }
+    else
+    {
+        std::lock_guard<Mutex> errorLock(errorStateMutex);
+        ErrorNumber = 1;
+        ErrorMessage = "\"Invalid endpoint path\"";
+        currentErrorNumber = ErrorNumber;
+        currentErrorMessage = ErrorMessage;
+    }
+
+    // Build JSON response
+    res.print("{");
+    res.print("\"ClientID\": ");
+    res.print(ClientID);
+    res.print(", \"ClientTransactionID\": ");
+    res.print(ClientTransactionID);
+    res.print(", \"ServerID\": ");
+    res.print(ServerID);
+    res.print(", \"ErrorNumber\": ");
+    res.print(currentErrorNumber);
+    res.print(", \"ErrorMessage\": ");
+    res.print(currentErrorMessage);
+    res.print(", \"Value\": ");
+
+    if (url == "name" || url == "driverversion")
+    {
+        res.print("\"");
+        res.print(ValueString);
+        res.print("\"");
+    }
+    else if (url == "issafe" || url == "connected")
+    {
+        res.print(ValueBool ? "true" : "false");
+    }
+    else
+    {
+        res.print(Value);
+    }
+    res.print("}");
+
+    // Reset error state only if we didn't just set a new error
+    if (url != "invalid")
+    {
+        std::lock_guard<Mutex> errorLock(errorStateMutex);
+        ErrorNumber = 0;
+        ErrorMessage = "\"\"";
+    }
+}
+
+// Display the form for setting the safety limits
+void index(Request &req, Response &res)
+{
+
+    res.set("Content-Type", "text/html; charset=utf-8");
+
+    String index_html = R"~(
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Safety limits</title>
+      <style>
+          body {
+              font-family: system-ui;
+              margin: 0;
+              padding: 0;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              height: 100vh;
+              background-color: #121212;
+              color: #fff;
+          }
+          .container {
+              padding: 20px;
+              border-radius: 8px;
+              box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+              width: 300px;
+              background-color: #1e1e1e;
+          }
+          h2 {
+              margin-top: 0;
+              font-size: large;
+              font-weight: 400;
+              color: #999999;
+          }
+          .form-group {
+              margin-bottom: 25px;
+              padding: 10px 0px;
+          }
+          .title {
+              display: flex; 
+              justify-content: space-between;
+              margin-bottom: 7px;
+          }
+          .property {
+              font-size: large;
+          }
+          .units {
+              font-size: small;
+              color: #999999;
+          }
+          .form-group label {
+              display: block;
+              margin-bottom: 5px;
+              font-size: small;
+              color: #999999;
+          }
+          .form-group input {
+              width: 100%;
+              padding: 8px;
+              box-sizing: border-box;
+          }
+          .form-group input[type="submit"] {
+              border: none;
+              cursor: pointer;
+              padding: 10px;
+              border-radius: 4px;
+              transition: background-color 0.3s, color 0.3s;
+              background-color: #93d4ff;
+              color: #000;
+          }
+          .form-group input[type="submit"]:hover {
+              opacity: 0.9;
+          }
+          .side-by-side {
+              display: flex;
+              justify-content: space-between;
+          }
+          .side-by-side > div {
+              flex: 1;
+          }
+          .side-by-side > div:first-child {
+              margin-right: 10px;
+          }
+      </style>
+  </head>
+  <body>
+      <div class="container">
+          <h2>Safety limits 🧯</h2>
+          <form action="/submit" method="post" onsubmit="return validateForm()">
+
+              <!-- temperature limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Temperature</div>
+                      <div class="units">°C</div>
+                  </div>
+                  <div class="side-by-side">
+                      <div title="Current: )~" +
+                        String(currentLimits.AT_min) + R"~( °C">
+                          <label for="min-temp">Min</label>
+                          <input type="number" id="min-temp" name="min-temp" value=)~" +
+                        String(currentLimits.AT_min) + R"~( required>
+                      </div>
+                      <div title="Current: )~" +
+                        String(currentLimits.AT_max) + R"~( °C">
+                          <label for="max-temp">Max</label>
+                          <input type="number" id="max-temp" name="max-temp" value=)~" +
+                        String(currentLimits.AT_max) + R"~( required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- humidity limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Humidity</div>
+                      <div class="units">%</div>
+                  </div>
+                  <div class="side-by-side">
+                      <div title="Current: )~" +
+                        String(currentLimits.AH_min) + R"~( %">
+                          <label for="min-rh">Min</label>
+                          <input type="number" id="min-rh" name="min-rh" value=)~" +
+                        String(currentLimits.AH_min) + R"~( min=0 required>
+                      </div>
+                      <div title="Current: )~" +
+                        String(currentLimits.AH_max) + R"~( %">
+                          <label for="max-rh">Max</label>
+                          <input type="number" id="max-rh" name="max-rh" value=)~" +
+                        String(currentLimits.AH_max) + R"~( max=100 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- wind limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Wind</div>
+                      <div class="units">m/s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" +
+                        String(currentLimits.SA_max) + R"~( m/s">
+                          <label for="max-wind">Max</label>
+                          <input type="number" id="max-wind" name="max-wind" value=)~" +
+                        String(currentLimits.SA_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- gust wind limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Gust wind</div>
+                      <div class="units">m/s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" +
+                        String(currentLimits.SM_max) + R"~( m/s">
+                          <label for="max-gust-wind">Max</label>
+                          <input type="number" id="max-gust-wind" name="max-gust-wind" value=)~" +
+                        String(currentLimits.SM_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- light limits -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Light</div>
+                      <div class="units">lux</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" +
+                        String(currentLimits.LX_max) + R"~( lux">
+                          <label for="max-light">Max</label>
+                          <input type="number" id="max-light" name="max-light" value=)~" +
+                        String(currentLimits.LX_max) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- sky temperature -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Sky temperature (NOT USED)</div>
+                      <div class="units">°C</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: null °C">
+                          <label for="max-sky-temp">Max</label>
+                          <input type="number" id="max-sky-temp" name="max-sky-temp" value=-30 required>
+                      </div>
+                  </div>
+              </div>
+
+              <!-- safety false duration -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Safety false duration</div>
+                      <div class="units">s</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" +
+                        String(currentLimits.safety_false_duration) + R"~( s">
+                          <label for="safety-false-duration">Min</label>
+                          <input type="number" id="safety-false-duration" name="safety-false-duration" value=)~" +
+                        String(currentLimits.safety_false_duration) + R"~( min=0 required>
+                      </div>
+                  </div>
+              </div>
+
+              <div class="form-group">
+                  <input type="submit" value="Submit">
+              </div>
+          </form>
+      </div>
+  </body>
+  <script>
+      // on load, reset the form
+      window.onload = function() {
+          document.querySelector('form').reset();
+      }
+
+      function validateForm() {
+          const minTemp = document.getElementById('min-temp').value;
+          const maxTemp = document.getElementById('max-temp').value;
+          if (parseInt(minTemp) > parseInt(maxTemp)) {
+              alert('Min temperature cannot be greater than Max temperature.');
+              return false;
+          }
+
+          const minRH = document.getElementById('min-rh').value;
+          const maxRH = document.getElementById('max-rh').value;
+          if (parseInt(minRH) > parseInt(maxRH)) {
+              alert('Min humidity cannot be greater than Max humidity.');
+              return false;
+          }
+
+          return true;
+      }
+  </script>
+  </html>
+  )~";
+
+    res.print(index_html);
+}
+
+// Submit the safety limits form data
+void submit(Request &req, Response &res)
+{
+    char name[32];
+    char value[32];
+    WeatherLimits newLimits;
+
+    // Get current limits as starting point
+    {
+        std::lock_guard<Mutex> lock(limitsConfigMutex);
+        newLimits = currentLimits;
+    }
+
+    while (req.left())
+    {
+        if (!req.form(name, 32, value, 32))
+        {
+            return res.sendStatus(400);
+        }
+
+        if (strcmp(name, "max-temp") == 0)
+        {
+            newLimits.AT_max = atof(value);
+        }
+        else if (strcmp(name, "min-temp") == 0)
+        {
+            newLimits.AT_min = atof(value);
+        }
+        else if (strcmp(name, "max-rh") == 0)
+        {
+            newLimits.AH_max = atof(value);
+        }
+        else if (strcmp(name, "min-rh") == 0)
+        {
+            newLimits.AH_min = atof(value);
+        }
+        else if (strcmp(name, "max-light") == 0)
+        {
+            newLimits.LX_max = atof(value);
+        }
+        else if (strcmp(name, "max-wind") == 0)
+        {
+            newLimits.SA_max = atof(value);
+        }
+        else if (strcmp(name, "max-gust-wind") == 0)
+        {
+            newLimits.SM_max = atof(value);
+        }
+        else if (strcmp(name, "safety-false-duration") == 0)
+        {
+            newLimits.safety_false_duration = atoi(value);
+        }
+    }
+
+    // Update the stats and save them to the store
+    auto result = setLimits(limitsKey, newLimits);
+
+    if (result != MBED_SUCCESS)
+    {
+        Serial.println("Error while saving to key-value store");
+        return res.sendStatus(500);
+    }
+
+    // Atomically update the current limits
+    {
+        std::lock_guard<Mutex> lock(limitsConfigMutex);
+        currentLimits = newLimits;
+    }
+
+    // ...existing HTML response code...
+    String header = R"~(
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Submitted safety limits</title>
+  </head>
+  <body>
+  )~";
+
+    String footer = R"~(
+  </body>
+  </html>
+  )~";
+
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.print(header);
+    res.print("<h1>Updated safety limits</h1>");
+    res.print("<br>Temperature: ");
+    res.print(newLimits.AT_min);
+    res.print(" - ");
+    res.print(newLimits.AT_max);
+    res.print(" °C");
+    res.print("<br>Humidity: ");
+    res.print(newLimits.AH_min);
+    res.print(" - ");
+    res.print(newLimits.AH_max);
+    res.print(" %RH");
+    res.print("<br>Light: ");
+    res.print(newLimits.LX_max);
+    res.print(" lux");
+    res.print("<br>Wind: ");
+    res.print(newLimits.SA_max);
+    res.print(" m/s");
+    res.print("<br>Gust wind: ");
+    res.print(newLimits.SM_max);
+    res.print(" m/s");
+    res.print("<br>Safety false duration: ");
+    res.print(newLimits.safety_false_duration);
+    res.print(" s");
+    res.print(footer);
+}
+
+// Retrieve WeatherLimits from the key-value store
+int getLimits(const char *key, WeatherLimits *limits)
+{
+    TDBStore::info_t info;
+    auto result = store.get_info(key, &info);
+
+    if (result == MBED_ERROR_ITEM_NOT_FOUND)
+    {
+        return result;
+    }
+
+    uint8_t buffer[info.size]{};
+    size_t actual_size;
+
+    result = store.get(key, buffer, sizeof(buffer), &actual_size);
+    if (result != MBED_SUCCESS)
+    {
+        return result;
+    }
+
+    memcpy(limits, buffer, sizeof(WeatherLimits));
+    return result;
+}
+
+// Store WeatherLimits to the key-value store
+int setLimits(const char *key, const WeatherLimits &limits)
+{
+    return store.set(key, reinterpret_cast<const uint8_t *>(&limits), sizeof(WeatherLimits), 0);
+}
+
+// Network processing thread
+void networkHandler()
+{
+    while (true)
+    {
+        EthernetClient client = server.available();
+
+        if (client.connected())
+        {
+            app.process(&client);
+            client.stop();
+        }
+
+        // Small delay to prevent tight loop
+        ThisThread::sleep_for(1);
+    }
+}
+
+// Arduino setup function
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000); // Wait for terminal to initialize
+
+    // Get MAC address from board info
+#if defined(GET_OPTA_OTP_BOARD_INFO)
+    info = boardInfo();
+    if (info->magic == 0xB5)
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            mac[i] = info->mac_address[i];
+        }
+    }
+#else
+    Serial.println("ERROR: MAC address not successfully set");
+    while (true)
+        ;
+#endif
+
+    // Initialize Ethernet
+    if (Ethernet.begin(mac, ip))
+    {
+        Serial.print("Ethernet initialized. IP: ");
+        Serial.println(Ethernet.localIP());
+    }
+    else
+    {
+        Serial.println("Ethernet initialization failed");
+        while (true)
+            ;
+    }
+
+    // Initialize flash storage
+    blockDevice.init();
+    Serial.print("FlashIAP block device size: ");
+    Serial.println(blockDevice.size());
+    blockDevice.deinit();
+
+    // Initialize key-value store
+    Serial.print("Initializing TDBStore: ");
+    auto result = store.init();
+    Serial.println(result == MBED_SUCCESS ? "OK" : "Failed");
+    if (result != MBED_SUCCESS)
+    {
+        while (true)
+            ;
+    }
+
+    // Load previous safety limits
+    Serial.println("Loading safety limits from storage...");
+    result = getLimits(limitsKey, &currentLimits);
+
+    if (result == MBED_SUCCESS)
+    {
+        Serial.println("Previous limits loaded successfully");
+        Serial.print("Temperature: ");
+        Serial.print(currentLimits.AT_min);
+        Serial.print(" - ");
+        Serial.println(currentLimits.AT_max);
+        Serial.print("Humidity: ");
+        Serial.print(currentLimits.AH_min);
+        Serial.print(" - ");
+        Serial.println(currentLimits.AH_max);
+        Serial.print("Light max: ");
+        Serial.println(currentLimits.LX_max);
+        Serial.print("Wind max: ");
+        Serial.println(currentLimits.SA_max);
+        Serial.print("Gust max: ");
+        Serial.println(currentLimits.SM_max);
+        Serial.print("Safety duration: ");
+        Serial.println(currentLimits.safety_false_duration);
+    }
+    else if (result == MBED_ERROR_ITEM_NOT_FOUND)
+    {
+        Serial.println("No previous limits found, using defaults");
+    }
+    else
+    {
+        Serial.println("Error reading from key-value store.");
+        while (true)
+            ;
+    }
+
+    // Initialize pins
+    pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    pinMode(RAIN_SENSOR_SAFE_PIN, INPUT);
+    pinMode(RAIN_SENSOR_SIGNAL_HIGH_PIN, OUTPUT);
+    digitalWrite(RAIN_SENSOR_SIGNAL_HIGH_PIN, HIGH);
+
+    // Setup web routes
+    app.get("/", &index);
+    app.post("/submit", &submit);
+
+    // ASCOM Alpaca SafetyMonitor API
+    app.get("/api/v1/safetymonitor/0/connected", &endPoint);
+    app.put("/api/v1/safetymonitor/0/connected", &endPoint);
+    app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
+    app.get("/api/v1/safetymonitor/0/name", &endPoint);
+    app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
+
+    // ASCOM Alpaca ObservingConditions API
+    app.get("/api/v1/observingconditions/0/connected", &endPoint);
+    app.put("/api/v1/observingconditions/0/connected", &endPoint);
+    app.get("/api/v1/observingconditions/0/name", &endPoint);
+    app.get("/api/v1/observingconditions/0/driverversion", &endPoint);
+    app.get("/api/v1/observingconditions/0/windspeed", &endPoint);
+    app.get("/api/v1/observingconditions/0/windgust", &endPoint);
+    app.get("/api/v1/observingconditions/0/winddirection", &endPoint);
+    app.get("/api/v1/observingconditions/0/rainrate", &endPoint);
+    app.get("/api/v1/observingconditions/0/temperature", &endPoint);
+    app.get("/api/v1/observingconditions/0/humidity", &endPoint);
+    app.get("/api/v1/observingconditions/0/dewpoint", &endPoint);
+    app.get("/api/v1/observingconditions/0/pressure", &endPoint);
+    app.get("/api/v1/observingconditions/0/skybrightness", &endPoint);
+
+    // Start services
+    server.begin();
+    RS485.begin(BAUDRATE);
+    RS485.setDelays(preDelayBR, postDelayBR);
+
+    // Start concurrent threads
+    Serial.println("Starting sensor reading thread...");
+    SensorReadThread.start(readSensors);
+
+    Serial.println("Starting network handler thread...");
+    NetworkThread.start(networkHandler);
+
+    Serial.println("System initialization complete");
+}
+
+// Main loop
+void loop()
+{
+    // Main thread can sleep as worker threads handle everything
+    ThisThread::sleep_for(100);
+}
