@@ -448,7 +448,7 @@ void endPoint(Request &req, Response &res)
   else if (url == "dewpoint")
   {
     // M1 from Górnicki, K., Winiczenko, R., Kaleta, A. and Choińska, A., 2017. Evaluation of models for the dew point temperature determination. Technical Sciences, 20(3), pp.241-257.
-    float B = (log(WSValues[1] / 100) + ((17.269 * WSValues[0]) / (243.3 + WSValues[0]))) / 17.269;
+    float B = (log(WSValues[WSKey["AH"]] / 100) + ((17.269 * WSValues[WSKey["AT"]]) / (243.3 + WSValues[WSKey["AT"]]))) / 17.269;
     float dewpoint = (243.3 * B) / (1 - B);
     Value = dewpoint;
   }
