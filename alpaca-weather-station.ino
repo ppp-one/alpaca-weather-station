@@ -15,8 +15,6 @@ OptaBoardInfo *boardInfo();
 
 using namespace mbed;
 
-#define GET_OPTA_OTP_BOARD_INFO ;
-
 // For storing the safety limits
 // Get limits of the In Application Program (IAP) flash, ie. the internal MCU flash.
 auto iapLimits{getFlashIAPLimits()};
@@ -90,6 +88,9 @@ std::unordered_map<std::string, int> s700Key = {
 
 // isSafe
 bool isSafe = false;
+// Safety pins
+constexpr int SAFETY_RELAY = D0;
+constexpr int SAFETY_RELAY_LED = LED_D0;
 
 // Rain sensor
 volatile bool rainSensorSafe = true;
@@ -181,20 +182,14 @@ void readSensors()
     if ((rtos::Kernel::Clock::now() - time_since_not_safe > std::chrono::seconds(currentLimits.safety_false_duration)) && isSafe)
     {
       isSafe = true;
+      digitalWrite(SAFETY_RELAY, HIGH);
+      digitalWrite(SAFETY_RELAY_LED, HIGH);
     }
     else
     {
       isSafe = false;
-    }
-
-    // testing LED
-    if (!isSafe)
-    {
-      digitalWrite(LED_D0, HIGH);
-    }
-    else
-    {
-      digitalWrite(LED_D0, LOW);
+      digitalWrite(SAFETY_RELAY, LOW);
+      digitalWrite(SAFETY_RELAY_LED, LOW);
     }
 
     // if no data received
@@ -973,7 +968,6 @@ void setup()
   //  Wait for terminal to come up
   delay(1000);
 
-#if defined(GET_OPTA_OTP_BOARD_INFO)
   info = boardInfo();
   if (info->magic == 0xB5)
   {
@@ -982,11 +976,6 @@ void setup()
       mac[i] = info->mac_address[i];
     }
   }
-#else
-  Serial.println("ERROR: MAC address not successfully set");
-  while (1)
-    ;
-#endif
 
   if (Ethernet.begin(mac, ip))
   {
@@ -1053,9 +1042,11 @@ void setup()
       ;
   }
 
-  // set pins for LEDs
+  // set pins for LED testing
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(LED_D0, OUTPUT);
+  // set pins safety hardwire
+  pinMode(SAFETY_RELAY, OUTPUT);
+  pinMode(SAFETY_RELAY_LED, OUTPUT);
 
   // for Kemo M152K rain sensor
   pinMode(rainSensorSafePin, INPUT);
