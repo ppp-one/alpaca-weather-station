@@ -15,7 +15,7 @@ for i in range(10):
 
     # Collect data
     new_data = {
-        # "dewpoint": WS.DewPoint,
+        "dewpoint": WS.DewPoint,
         "humidity": WS.Humidity,
         "temperature": WS.Temperature,
         "windspeed": WS.WindSpeed,
@@ -32,4 +32,4 @@ for i in range(10):
     time_per_request = (end_time - current_time).total_seconds() / len(new_data.keys())
 
     print(f"Collected data at {current_time}: {new_data}")
-    print(f"Time per request: {time_per_request:.2f} seconds")
+    print(f"Time per request: {time_per_request:.3f} seconds")

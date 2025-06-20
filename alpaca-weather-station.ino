@@ -166,22 +166,6 @@ void readSensors()
     mlx1AmbientTemperature = mlx1.getAmbientTempCelsius();
     mlx2AmbientTemperature = mlx2.getAmbientTempCelsius();
     skyTemperature = std::max(mlx1SkyTemperature, mlx2SkyTemperature); // max of both sensors
-    // print mlx1 and mlx2 temperatures, object and ambient
-    Serial.print("MLX1 - Object: ");
-    Serial.print(mlx1SkyTemperature);
-    Serial.print(" °C, Ambient: ");
-    Serial.print(mlx1AmbientTemperature);
-    Serial.print(" °C, ");
-    Serial.print("MLX2 - Object: ");
-    Serial.print(mlx2SkyTemperature);
-    Serial.print(" °C, Ambient: ");
-    Serial.print(mlx2AmbientTemperature);
-    Serial.println();
-
-    Serial.print("Sky temperature: ");
-    Serial.print(skyTemperature);
-    Serial.print(" °C");
-    Serial.println();
 
     // safety check of weather station data
     safety_check_received = safetyCheck();
