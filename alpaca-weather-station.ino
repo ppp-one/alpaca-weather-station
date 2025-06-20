@@ -452,10 +452,9 @@ void endPoint(Request &req, Response &res)
   }
   else if (url == "dewpoint")
   {
-    // TODO: check this okay
-    // source?
-    float B = (log(s700Values[1] / 100) + ((17.27 * s700Values[0]) / (237.7 + s700Values[0]))) / 17.27;
-    float dewpoint = (237.7 * B) / (1 - B);
+    // M1 from Górnicki, K., Winiczenko, R., Kaleta, A. and Choińska, A., 2017. Evaluation of models for the dew point temperature determination. Technical Sciences, 20(3), pp.241-257.
+    float B = (log(s700Values[1] / 100) + ((17.269 * s700Values[0]) / (243.3 + s700Values[0]))) / 17.269;
+    float dewpoint = (243.3 * B) / (1 - B);
     Value = dewpoint;
   }
   else if (url == "pressure")
