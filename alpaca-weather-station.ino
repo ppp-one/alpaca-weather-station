@@ -63,11 +63,11 @@ constexpr auto postDelayBR{bitduration * wordlen * 3.5f * 1e6};
 // Thread for reading sensors
 static rtos::Thread SensorReadThread;
 
-// S700 values
-float s700Values[16];
+// S700 Weather Station values
+float WSValues[16];
 
-// S700 key
-std::unordered_map<std::string, int> s700Key = {
+// S700 Weather Station keys
+std::unordered_map<std::string, int> WSKey = {
     {"AT", 0},   // AT Air temperature C
     {"AH", 1},   // AH Air humidity %RH
     {"AP", 2},   // AP Barometric pressure Pa
@@ -284,7 +284,7 @@ bool readWeatherStation()
           // Serial.print(" ");
           // Serial.println(vi.substring(3).toFloat());
 
-          s700Values[valint] = vi.substring(3).toFloat();
+          WSValues[valint] = vi.substring(3).toFloat();
           valint++;
         }
       }
@@ -317,39 +317,39 @@ bool safetyCheck()
 
   // check if any values are outside of the safety limits
   // temperature
-  if (s700Values[s700Key["AT"]] < currentLimits.AT_min || s700Values[s700Key["AT"]] > currentLimits.AT_max)
+  if (WSValues[WSKey["AT"]] < currentLimits.AT_min || WSValues[WSKey["AT"]] > currentLimits.AT_max)
   {
     Serial.println("Temperature out of range");
     safe = false;
   }
   // humidity
-  if (s700Values[s700Key["AH"]] < currentLimits.AH_min || s700Values[s700Key["AH"]] > currentLimits.AH_max)
+  if (WSValues[WSKey["AH"]] < currentLimits.AH_min || WSValues[WSKey["AH"]] > currentLimits.AH_max)
   {
     Serial.println("Humidity out of range");
     safe = false;
   }
   // pressure
-  // if (s700Values[s700Key["AP"]] < currentLimits.AP_min || s700Values[s700Key["AP"]] > currentLimits.AP_max) {
+  // if (WSValues[WSKey["AP"]] < currentLimits.AP_min || WSValues[WSKey["AP"]] > currentLimits.AP_max) {
   //   Serial.println("Pressure out of range");
   //   safe = false;
   // }
 
   // light intensity
-  if (s700Values[s700Key["LX"]] > currentLimits.LX_max)
+  if (WSValues[WSKey["LX"]] > currentLimits.LX_max)
   {
     Serial.println("Light intensity out of range");
     safe = false;
   }
 
   // gust wind speed
-  if (s700Values[s700Key["SM"]] > currentLimits.SM_max)
+  if (WSValues[WSKey["SM"]] > currentLimits.SM_max)
   {
     Serial.println("Wind speed out of range");
     safe = false;
   }
 
   // average wind speed
-  if (s700Values[s700Key["SA"]] > currentLimits.SA_max)
+  if (WSValues[WSKey["SA"]] > currentLimits.SA_max)
   {
     Serial.println("Wind speed out of range");
     safe = false;
@@ -357,26 +357,26 @@ bool safetyCheck()
 
   // these require user resetting (see manual)
   // // accumulated rainfall
-  // if (s700Values[s700Key["RA"]] > currentLimits.RA_max) {
+  // if (WSValues[WSKey["RA"]] > currentLimits.RA_max) {
   //   Serial.println("Rainfall out of range");
   //   safe = false;
   // }
 
   // // duration of rainfall
-  // if (s700Values[s700Key["RD"]] > currentLimits.RD_max) {
+  // if (WSValues[WSKey["RD"]] > currentLimits.RD_max) {
   //   Serial.println("Rainfall duration out of range");
   //   safe = false;
   // }
 
   // rainfall intensity
-  if (s700Values[s700Key["RI"]] > 0)
+  if (WSValues[WSKey["RI"]] > 0)
   {
     Serial.println("Rainfall intensity out of range");
     safe = false;
   }
 
   // maximum rainfall intensity
-  if (s700Values[s700Key["Rp"]] > 0)
+  if (WSValues[WSKey["Rp"]] > 0)
   {
     Serial.println("Rainfall intensity out of range");
     safe = false;
@@ -439,42 +439,42 @@ void endPoint(Request &req, Response &res)
   }
   else if (url == "temperature")
   {
-    Value = s700Values[s700Key["AT"]];
+    Value = WSValues[WSKey["AT"]];
   }
   else if (url == "humidity")
   {
-    Value = s700Values[s700Key["AH"]];
+    Value = WSValues[WSKey["AH"]];
   }
   else if (url == "dewpoint")
   {
     // M1 from Górnicki, K., Winiczenko, R., Kaleta, A. and Choińska, A., 2017. Evaluation of models for the dew point temperature determination. Technical Sciences, 20(3), pp.241-257.
-    float B = (log(s700Values[1] / 100) + ((17.269 * s700Values[0]) / (243.3 + s700Values[0]))) / 17.269;
+    float B = (log(WSValues[1] / 100) + ((17.269 * WSValues[0]) / (243.3 + WSValues[0]))) / 17.269;
     float dewpoint = (243.3 * B) / (1 - B);
     Value = dewpoint;
   }
   else if (url == "pressure")
   {
-    Value = s700Values[s700Key["AP"]] / 100;
+    Value = WSValues[WSKey["AP"]] / 100;
   }
   else if (url == "skybrightness")
   {
-    Value = s700Values[s700Key["LX"]];
+    Value = WSValues[WSKey["LX"]];
   }
   else if (url == "windspeed")
   {
-    Value = s700Values[s700Key["SA"]];
+    Value = WSValues[WSKey["SA"]];
   }
   else if (url == "windgust")
   {
-    Value = s700Values[s700Key["SM"]];
+    Value = WSValues[WSKey["SM"]];
   }
   else if (url == "winddirection")
   {
-    Value = s700Values[s700Key["DA"]];
+    Value = WSValues[WSKey["DA"]];
   }
   else if (url == "rainrate")
   {
-    Value = s700Values[s700Key["RI"]];
+    Value = WSValues[WSKey["RI"]];
     if (!rainSensorSafe)
     {
       Value += 0.01; // add 0.01 mm/h if rain sensor is active since rainrate on the S700 is not that sensitive
