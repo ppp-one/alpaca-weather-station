@@ -454,8 +454,8 @@ void endPoint(Request &req, Response &res)
   {
     // TODO: check this okay
     // source?
-    float B = (log(s700Values[1] / 100) + ((17.27 * s700Values[0]) / (237.3 + s700Values[0]))) / 17.27;
-    float dewpoint = (237.3 * B) / (1 - B);
+    float B = (log(s700Values[1] / 100) + ((17.27 * s700Values[0]) / (237.7 + s700Values[0]))) / 17.27;
+    float dewpoint = (237.7 * B) / (1 - B);
     Value = dewpoint;
   }
   else if (url == "pressure")
