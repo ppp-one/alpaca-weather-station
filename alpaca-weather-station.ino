@@ -41,8 +41,10 @@ struct WeatherLimits
   // float RD_max; // Duration of rainfall high limit s
   // float RI_max; // Rainfall intensity high limit mm/h (default), in/h
   // float Rp_max; // Maximum rainfall intensity high limit mm/h (default), in/h
-  float ST_min = -80;             // Sky temperature low limit C (not used)
-  float ST_max = -30;             // Sky temperature high limit C (not used)
+  float ST_min = -80; // Sky temperature low limit C
+  float ST_max = -30; // Sky temperature high limit C
+  // float RST_min = -80;             // Relative sky temperature low limit C
+  float RST_max = -20;            // Relative sky temperature high limit C
   int safety_false_duration = 10; // Time in seconds to keep isSafe false if not safe
 };
 
@@ -100,6 +102,7 @@ constexpr int rainSensorSignalHighPin = A6;
 // SkyTemperature sensor
 DFRobot_MLX90614_I2C mlx1(0x5A, &Wire, 11, 12); // I2C address is 0x5A
 DFRobot_MLX90614_I2C mlx2(0x5B, &Wire, 11, 12); // I2C address is 0x5B
+float relativeSkyTemperature;                   // Relative sky temperature in Celsius
 float skyTemperature;                           // Sky temperature in Celsius
 float mlx1SkyTemperature;                       // Sky temperature in Celsius
 float mlx2SkyTemperature;                       // Sky temperature in Celsius
@@ -167,12 +170,13 @@ void readSensors()
     mlx1AmbientTemperature = mlx1.getAmbientTempCelsius();
     mlx2AmbientTemperature = mlx2.getAmbientTempCelsius();
     skyTemperature = std::max(mlx1SkyTemperature, mlx2SkyTemperature); // max of both sensors
+    relativeSkyTemperature = skyTemperature - WSValues[WSKey["AT"]];   // relative to weather station air temperature
 
     // safety check of weather station data
     safety_check_received = safetyCheck();
 
     // set isSafe
-    isSafe = weather_station_data_received && safety_check_received; // && rainSensorSafe;
+    isSafe = weather_station_data_received && safety_check_received;
 
     // if not safe, keep isSafe false for 10 s, but continue to read sensors
     if (!isSafe)
@@ -389,6 +393,13 @@ bool safetyCheck()
     safe = false;
   }
 
+  // relative sky temperature
+  if (relativeSkyTemperature > currentLimits.RST_max)
+  {
+    Serial.println("Relative sky temperature out of range");
+    safe = false;
+  }
+
   return safe;
 }
 
@@ -475,6 +486,10 @@ void endPoint(Request &req, Response &res)
   else if (url == "rainrate")
   {
     Value = WSValues[WSKey["RI"]];
+    if (Value > 500)
+    {
+      Value = 500; // rainrate error value
+    }
     if (!rainSensorSafe)
     {
       Value += 0.01; // add 0.01 mm/h if rain sensor is active since rainrate on the S700 is not that sensitive
@@ -483,6 +498,10 @@ void endPoint(Request &req, Response &res)
   else if (url == "skytemperature")
   {
     Value = skyTemperature;
+  }
+  else if (url == "relativeskytemperature")
+  {
+    Value = relativeSkyTemperature;
   }
   else if (url == "rawmlx")
   {
@@ -746,6 +765,22 @@ void index(Request &req, Response &res)
                   </div>
               </div>
 
+              <!-- relative sky temperature -->
+              <div class="form-group">
+                  <div class="title">
+                      <div class="property">Relative sky temperature</div>
+                      <div class="units">°C</div>
+                  </div>
+                  <div class="">
+                      <div title="Current: )~" +
+                      String(currentLimits.RST_max) + R"~( °C">
+                          <label for="max-rel-sky-temp">Max</label>
+                          <input type="number" id="max-rel-sky-temp" name="max-rel-sky-temp" value=)~" +
+                      String(currentLimits.RST_max) + R"~( required>
+                      </div>
+                  </div>
+              </div>
+
               <!-- safety false duration -->
               <div class="form-group">
                   <div class="title">
@@ -855,6 +890,10 @@ void submit(Request &req, Response &res)
     {
       currentLimits.ST_max = atof(value);
     }
+    else if (strcmp(name, "max-rel-sky-temp") == 0)
+    {
+      currentLimits.RST_max = atof(value);
+    }
     else if (strcmp(name, "safety-false-duration") == 0)
     {
       currentLimits.safety_false_duration = atoi(value);
@@ -921,6 +960,10 @@ void submit(Request &req, Response &res)
   res.print(currentLimits.ST_min);
   res.print(" - ");
   res.print(currentLimits.ST_max);
+  res.print(" °C");
+
+  res.print("<br>Relative sky temperature: ");
+  res.print(currentLimits.RST_max);
   res.print(" °C");
 
   res.print("<br>Safety false duration: ");
