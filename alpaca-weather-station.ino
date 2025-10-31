@@ -9,6 +9,7 @@
 #include "FlashIAPLimits.h"
 #include <TDBStore.h>
 #include "opta_info.h"
+#include <drivers/Watchdog.h>
 
 OptaBoardInfo *info;
 OptaBoardInfo *boardInfo();
@@ -93,6 +94,7 @@ bool isSafe = false;
 // Safety pins
 constexpr int SAFETY_RELAY = D0;
 constexpr int SAFETY_RELAY_LED = LED_D0;
+const unsigned long WATCHDOG_TIMEOUT = 20000; // 20 seconds watchdog timeout
 
 // Rain sensor
 volatile bool rainSensorSafe = true;
@@ -210,6 +212,7 @@ void readSensors()
       rtos::ThisThread::sleep_for(500);
       digitalWrite(LED_BUILTIN, LOW);
       rtos::ThisThread::sleep_for(500);
+      mbed::Watchdog::get_instance().kick();
     }
   }
 }
@@ -1005,11 +1008,13 @@ int setLimits(const char *key, WeatherLimits stats)
 // setup
 void setup()
 {
+  Serial.begin(9600);
 
-  Serial.begin(115200);
-
-  //  Wait for terminal to come up
+  // wait for terminal to come up
   delay(1000);
+
+  // start the watchdog
+  mbed::Watchdog::get_instance().start(WATCHDOG_TIMEOUT);
 
   info = boardInfo();
   if (info->magic == 0xB5)
@@ -1181,7 +1186,6 @@ void setup()
 // loop
 void loop()
 {
-
   EthernetClient client = server.available();
 
   if (client.connected())
@@ -1189,6 +1193,7 @@ void loop()
     app.process(&client);
     client.stop();
   }
+  mbed::Watchdog::get_instance().kick();
 }
 
 // opta manual
