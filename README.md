@@ -2,6 +2,8 @@
 
 Custom Arduino Opta PLC weather station and safety controller for observatory automation that monitors environmental conditions and provides real-time weather data to prevent telescope damage.
 
+![Pole mounted view](./images/pole_mounted_view.jpeg)
+
 ## Purpose
 
 This PLC acts as a comprehensive weather monitoring system that:
