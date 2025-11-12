@@ -163,8 +163,22 @@ void readSensors()
 
     digitalWrite(LED_BUILTIN, HIGH);
 
-    // read weather station data
-    weather_station_data_received = readWeatherStation();
+    // read weather station data with retry logic
+    weather_station_data_received = false;
+    const int maxAttempts = 3;
+    for (int attempt = 0; attempt < maxAttempts && !weather_station_data_received; attempt++)
+    {
+      weather_station_data_received = readWeatherStation();
+      if (!weather_station_data_received && attempt < maxAttempts - 1)
+      {
+        Serial.print("Weather station read failed, retrying (attempt ");
+        Serial.print(attempt + 2);
+        Serial.print("/");
+        Serial.print(maxAttempts);
+        Serial.println(")");
+        rtos::ThisThread::sleep_for(100); // Small delay between retries
+      }
+    }
 
     // read sky temperature
     mlx1SkyTemperature = mlx1.getObjectTempCelsius();
@@ -284,13 +298,6 @@ bool readWeatherStation()
 
         if (vi.length() > 2 && valint < 15)
         {
-          // Serial.print("valint: ");
-          // Serial.print(valint);
-          // Serial.print(" ");
-          // Serial.print(vi);
-          // Serial.print(" ");
-          // Serial.println(vi.substring(3).toFloat());
-
           WSValues[valint] = vi.substring(3).toFloat();
           valint++;
         }
