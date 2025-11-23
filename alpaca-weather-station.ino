@@ -55,6 +55,88 @@ WeatherLimits currentLimits;
 // An example key name for the stats on the store
 const char limitsKey[]{"limits"};
 
+// Rolling median filter for outlier detection
+struct RollingMedian {
+  static const int WINDOW_SIZE = 5;
+  float values[WINDOW_SIZE];
+  int count = 0;
+  int index = 0;
+  
+  void add(float value) {
+    values[index] = value;
+    index = (index + 1) % WINDOW_SIZE;
+    if (count < WINDOW_SIZE) count++;
+  }
+  
+  float getMedian() {
+    if (count == 0) return 0;
+    
+    // Copy values to sort
+    float sorted[WINDOW_SIZE];
+    for (int i = 0; i < count; i++) {
+      sorted[i] = values[i];
+    }
+    
+    // Simple bubble sort (fine for 5 elements)
+    for (int i = 0; i < count - 1; i++) {
+      for (int j = 0; j < count - i - 1; j++) {
+        if (sorted[j] > sorted[j + 1]) {
+          float temp = sorted[j];
+          sorted[j] = sorted[j + 1];
+          sorted[j + 1] = temp;
+        }
+      }
+    }
+    
+    // Return median
+    if (count % 2 == 0) {
+      return (sorted[count/2 - 1] + sorted[count/2]) / 2.0;
+    } else {
+      return sorted[count/2];
+    }
+  }
+  
+  bool isFull() {
+    return count == WINDOW_SIZE;
+  }
+  
+  void reset() {
+    count = 0;
+    index = 0;
+  }
+};
+
+// Create rolling median filters for all weather station sensors
+RollingMedian tempFilter;        // AT - Air temperature
+RollingMedian humidityFilter;    // AH - Air humidity
+RollingMedian pressureFilter;    // AP - Barometric pressure
+RollingMedian lightFilter;       // LX - Light intensity
+RollingMedian windDirMinFilter;  // DN - Minimum wind direction
+RollingMedian windDirMaxFilter;  // Dm - Maximum wind direction
+RollingMedian windDirAvgFilter;  // DA - Average wind direction
+RollingMedian windSpeedMinFilter; // SN - Minimum wind speed
+RollingMedian windSpeedMaxFilter; // SM - Maximum wind speed (gust)
+RollingMedian windSpeedAvgFilter; // SA - Average wind speed
+RollingMedian rainAccumFilter;   // RA - Accumulated rainfall
+RollingMedian rainDurationFilter; // RD - Duration of rainfall
+RollingMedian rainIntensityFilter; // RI - Rainfall intensity
+RollingMedian rainPeakFilter;    // Rp - Maximum rainfall intensity
+RollingMedian heatingTempFilter; // HT - Heating temperature
+
+// Create rolling median filters for sky temperature sensors
+RollingMedian skyTempFilter;
+RollingMedian mlx1SkyFilter;
+RollingMedian mlx2SkyFilter;
+RollingMedian mlx1AmbientFilter;
+RollingMedian mlx2AmbientFilter;
+
+// Create rolling median filter for rain sensor analog reading
+RollingMedian rainSensorFilter;
+
+// Track consecutive read failures
+int consecutiveReadFailures = 0;
+const int MAX_CONSECUTIVE_FAILURES = 3;
+
 // RS485
 constexpr auto baudrate{9600};
 // Calculate preDelay and postDelay in microseconds for stable RS-485 transmission
@@ -155,6 +237,7 @@ void readSensors()
 {
   auto time_since_not_safe = rtos::Kernel::Clock::now();
   bool weather_station_data_received = false;
+  bool sky_temp_data_valid = false;
   bool safety_check_received = false;
 
   while (true)
@@ -180,21 +263,98 @@ void readSensors()
       }
     }
 
-    // read sky temperature
-    mlx1SkyTemperature = mlx1.getObjectTempCelsius();
-    mlx2SkyTemperature = mlx2.getObjectTempCelsius();
-    mlx1AmbientTemperature = mlx1.getAmbientTempCelsius();
-    mlx2AmbientTemperature = mlx2.getAmbientTempCelsius();
-    skyTemperature = std::max(mlx1SkyTemperature, mlx2SkyTemperature); // max of both sensors
-    relativeSkyTemperature = skyTemperature - WSValues[WSKey["AT"]];   // relative to weather station air temperature
+    // Track consecutive failures for weather station
+    if (!weather_station_data_received) {
+      consecutiveReadFailures++;
+      Serial.print("Consecutive failures: ");
+      Serial.println(consecutiveReadFailures);
+    } else {
+      consecutiveReadFailures = 0; // Reset on success
+    }
 
-    // safety check of weather station data
-    safety_check_received = safetyCheck();
+    // read sky temperature with retry and validation
+    sky_temp_data_valid = false;
+    float mlx1Sky = 0, mlx2Sky = 0, mlx1Amb = 0, mlx2Amb = 0;
+    
+    for (int attempt = 0; attempt < maxAttempts && !sky_temp_data_valid; attempt++)
+    {
+      mlx1Sky = mlx1.getObjectTempCelsius();
+      mlx2Sky = mlx2.getObjectTempCelsius();
+      mlx1Amb = mlx1.getAmbientTempCelsius();
+      mlx2Amb = mlx2.getAmbientTempCelsius();
+      
+      // Basic sanity check on readings (-80 to 85°C for sky and ambient)
+      if (mlx1Sky > -80 && mlx1Sky < 85 && mlx2Sky > -80 && mlx2Sky < 85 &&
+          mlx1Amb > -80 && mlx1Amb < 85 && mlx2Amb > -80 && mlx2Amb < 85) {
+        sky_temp_data_valid = true;
+        
+        // Add raw readings to filters
+        mlx1SkyFilter.add(mlx1Sky);
+        mlx2SkyFilter.add(mlx2Sky);
+        mlx1AmbientFilter.add(mlx1Amb);
+        mlx2AmbientFilter.add(mlx2Amb);
+        
+        // Get filtered values
+        mlx1SkyTemperature = mlx1SkyFilter.getMedian();
+        mlx2SkyTemperature = mlx2SkyFilter.getMedian();
+        mlx1AmbientTemperature = mlx1AmbientFilter.getMedian();
+        mlx2AmbientTemperature = mlx2AmbientFilter.getMedian();
+        
+        // Calculate sky temperature as max of both filtered sensors
+        float maxSkyTemp = std::max(mlx1SkyTemperature, mlx2SkyTemperature);
+        skyTempFilter.add(maxSkyTemp);
+        skyTemperature = skyTempFilter.getMedian();
+        relativeSkyTemperature = skyTemperature - WSValues[WSKey["AT"]];
+      } else if (attempt < maxAttempts - 1) {
+        Serial.print("Sky temp invalid, retrying (attempt ");
+        Serial.print(attempt + 2);
+        Serial.println(")");
+        rtos::ThisThread::sleep_for(100);
+      }
+    }
+    
+    if (!sky_temp_data_valid) {
+      consecutiveReadFailures++;
+      Serial.print("Sky temp failure - consecutive failures: ");
+      Serial.println(consecutiveReadFailures);
+    }
 
-    // set isSafe
-    isSafe = weather_station_data_received && safety_check_received;
+    // If too many consecutive failures, mark unsafe and reset filters
+    if (consecutiveReadFailures >= MAX_CONSECUTIVE_FAILURES) {
+      Serial.println("Too many consecutive sensor failures - marking UNSAFE");
+      ErrorNumber = 2;
+      ErrorMessage = "\"Sensor communication failed\"";
+      isSafe = false;
+      
+      // Reset all filters on persistent failures
+      tempFilter.reset();
+      humidityFilter.reset();
+      pressureFilter.reset();
+      lightFilter.reset();
+      windDirMinFilter.reset();
+      windDirMaxFilter.reset();
+      windDirAvgFilter.reset();
+      windSpeedMinFilter.reset();
+      windSpeedMaxFilter.reset();
+      windSpeedAvgFilter.reset();
+      rainAccumFilter.reset();
+      rainDurationFilter.reset();
+      rainIntensityFilter.reset();
+      rainPeakFilter.reset();
+      heatingTempFilter.reset();
+      skyTempFilter.reset();
+      mlx1SkyFilter.reset();
+      mlx2SkyFilter.reset();
+      mlx1AmbientFilter.reset();
+      mlx2AmbientFilter.reset();
+      rainSensorFilter.reset();
+    } else {
+      // Normal safety check
+      safety_check_received = safetyCheck();
+      isSafe = weather_station_data_received && sky_temp_data_valid && safety_check_received;
+    }
 
-    // if not safe, keep isSafe false for 10 s, but continue to read sensors
+    // if not safe, keep isSafe false for configured duration, but continue to read sensors
     if (!isSafe)
     {
       time_since_not_safe = rtos::Kernel::Clock::now();
@@ -204,6 +364,7 @@ void readSensors()
       isSafe = true;
       digitalWrite(SAFETY_RELAY, HIGH);
       digitalWrite(SAFETY_RELAY_LED, HIGH);
+      consecutiveReadFailures = 0; // Reset on safe condition restored
     }
     else
     {
@@ -282,6 +443,9 @@ bool readWeatherStation()
     int maxIndex = val.length() - 1;
     char separator = ';';
 
+    // Temporary storage for new readings
+    float tempWSValues[16];
+
     for (int i = 0; i <= maxIndex; i++)
     {
       if (val.charAt(i) == separator || i == maxIndex)
@@ -298,11 +462,49 @@ bool readWeatherStation()
 
         if (vi.length() > 2 && valint < 15)
         {
-          WSValues[valint] = vi.substring(3).toFloat();
+          tempWSValues[valint] = vi.substring(3).toFloat();
           valint++;
         }
       }
     }
+    
+    // Add all raw readings to their respective filters
+    tempFilter.add(tempWSValues[WSKey["AT"]]);
+    humidityFilter.add(tempWSValues[WSKey["AH"]]);
+    pressureFilter.add(tempWSValues[WSKey["AP"]]);
+    lightFilter.add(tempWSValues[WSKey["LX"]]);
+    windDirMinFilter.add(tempWSValues[WSKey["DN"]]);
+    windDirMaxFilter.add(tempWSValues[WSKey["Dm"]]);
+    windDirAvgFilter.add(tempWSValues[WSKey["DA"]]);
+    windSpeedMinFilter.add(tempWSValues[WSKey["SN"]]);
+    windSpeedMaxFilter.add(tempWSValues[WSKey["SM"]]);
+    windSpeedAvgFilter.add(tempWSValues[WSKey["SA"]]);
+    rainAccumFilter.add(tempWSValues[WSKey["RA"]]);
+    rainDurationFilter.add(tempWSValues[WSKey["RD"]]);
+    rainIntensityFilter.add(tempWSValues[WSKey["RI"]]);
+    rainPeakFilter.add(tempWSValues[WSKey["Rp"]]);
+    heatingTempFilter.add(tempWSValues[WSKey["HT"]]);
+    
+    // Update WSValues with filtered (median) values
+    WSValues[WSKey["AT"]] = tempFilter.getMedian();
+    WSValues[WSKey["AH"]] = humidityFilter.getMedian();
+    WSValues[WSKey["AP"]] = pressureFilter.getMedian();
+    WSValues[WSKey["LX"]] = lightFilter.getMedian();
+    WSValues[WSKey["DN"]] = windDirMinFilter.getMedian();
+    WSValues[WSKey["Dm"]] = windDirMaxFilter.getMedian();
+    WSValues[WSKey["DA"]] = windDirAvgFilter.getMedian();
+    WSValues[WSKey["SN"]] = windSpeedMinFilter.getMedian();
+    WSValues[WSKey["SM"]] = windSpeedMaxFilter.getMedian();
+    WSValues[WSKey["SA"]] = windSpeedAvgFilter.getMedian();
+    WSValues[WSKey["RA"]] = rainAccumFilter.getMedian();
+    WSValues[WSKey["RD"]] = rainDurationFilter.getMedian();
+    WSValues[WSKey["RI"]] = rainIntensityFilter.getMedian();
+    WSValues[WSKey["Rp"]] = rainPeakFilter.getMedian();
+    WSValues[WSKey["HT"]] = heatingTempFilter.getMedian();
+    
+    // TILT is not filtered (binary status)
+    WSValues[WSKey["TILT"]] = tempWSValues[WSKey["TILT"]];
+    
     return true;
   }
   else
@@ -317,10 +519,19 @@ bool readWeatherStation()
 bool safetyCheck()
 {
   bool safe = true;
-  // rainSensorSafe
-  if (analogRead(rainSensorSafePin) > 10)
+  
+  // rainSensorSafe - use filtered value to avoid noise
+  int rainSensorReading = analogRead(rainSensorSafePin);
+  rainSensorFilter.add(rainSensorReading);
+  float filteredRainSensor = rainSensorFilter.getMedian();
+  
+  if (filteredRainSensor > 10)
   {
-    Serial.println("Rain sensor active");
+    Serial.print("Rain sensor active (filtered: ");
+    Serial.print(filteredRainSensor);
+    Serial.print(", raw: ");
+    Serial.print(rainSensorReading);
+    Serial.println(")");
     rainSensorSafe = false;
     safe = false;
   }
