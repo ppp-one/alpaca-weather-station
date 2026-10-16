@@ -43,7 +43,7 @@ The system continuously monitors weather conditions using three hardware interfa
 │                    MAIN LOOP (loop)                     │
 │  - Listens for HTTP requests                            │
 │  - Serves web interface and API                         │
-│  - Kicks watchdog timer                                 │
+│  - Kicks watchdog while sensor thread is alive          │
 └─────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────┐
@@ -105,6 +105,8 @@ The system evaluates safety by checking:
 | Relative Sky Temp | temp ≤ RST_max | ≤ -20°C |
 | Rain Detection | No active rain sensor | Digital/Analog |
 | Rainfall Rate | RI = 0 and Rp = 0 | 0 mm/h |
+| Station Tilt | TILT = 0 | Station upright |
+| Sensor Data | Valid S700 and MLX readings this cycle | - |
 
 **When ANY condition fails:**
 1. `isSafe` flag is set to `false`
@@ -124,7 +126,7 @@ The code uses **RTOS threads** to handle concurrent operations:
 
 - **Main Thread** (`loop`): Handles HTTP requests, web interface, API calls
 - **Sensor Thread** (`readSensors`): Continuously reads sensors and evaluates safety
-- **Watchdog Timer**: Resets the system if it hangs (20-second timeout)
+- **Watchdog Timer**: Resets the system if either thread stops (20-second timeout). `loop()` kicks the watchdog only while the sensor thread finishes a cycle at least every 15 seconds.
 
 This ensures the web interface stays responsive even while sensors are being polled.
 
@@ -161,17 +163,27 @@ The interface provides a dark-themed form to configure all safety limits:
 
 All settings are **persisted to flash memory** and survive power cycles.
 
+The top of the page shows the current safety state, the last sensor error, the uptime, the cause of the last reset (power on, watchdog, brown-out and so on) and the heap in use. Use it to find out why the board restarted.
+
+Alpaca clients find the same page at `/setup`, `/setup/v1/safetymonitor/0/setup` and `/setup/v1/observingconditions/0/setup`.
+
 ## ASCOM Alpaca APIs
+
+The device follows the [Alpaca Device API](https://ascom-standards.org/api/) and serves two devices: SafetyMonitor 0 (`ISafetyMonitorV3`) and ObservingConditions 0 (`IObservingConditionsV2`).
+
+- **Discovery**: answers `alpacadiscovery1` broadcasts on UDP port 32227.
+- **Management API**: `/management/apiversions`, `/management/v1/description`, `/management/v1/configureddevices`.
+- **Common members** for both devices: `connected` (GET/PUT), `connect`, `disconnect`, `connecting`, `name`, `description`, `driverinfo`, `driverversion`, `interfaceversion`, `supportedactions`, `devicestate`. `action` and `command*` return "not implemented".
 
 ### Safety Monitor API
 Base URL: `http://192.168.1.12/api/v1/safetymonitor/0/`
 
 | Endpoint | Method | Description | Returns |
 |----------|--------|-------------|---------|
-| `/connected` | GET/PUT | Check connection status | `{ "Value": true }` |
-| `/issafe` | GET | Get overall safety status | `{ "Value": true/false }` |
-| `/name` | GET | Device name | `{ "Value": "Weather Station..." }` |
-| `/driverversion` | GET | Driver version | `{ "Value": "0.0.2" }` |
+| `/issafe` | GET | Overall safety status | `true`/`false` |
+| `/devicestate` | GET | Operational state | `[{"Name":"IsSafe","Value":true}]` |
+
+`IsSafe` does not depend on the connected state. All clients share one connected state, so one client that disconnects must not make the state unsafe for the others. The ASCOM interface says `IsSafe` should be `false` while disconnected; this device does not do that on purpose. The hard-wired safety relay also does not depend on the connected state.
 
 ### Observing Conditions API
 Base URL: `http://192.168.1.12/api/v1/observingconditions/0/`
@@ -181,19 +193,31 @@ Base URL: `http://192.168.1.12/api/v1/observingconditions/0/`
 | `/temperature` | Ambient air temperature | °C | S700 AT |
 | `/humidity` | Relative humidity | % | S700 AH |
 | `/dewpoint` | Calculated dew point | °C | Formula* |
-| `/pressure` | Barometric pressure | hPa | S700 AP |
+| `/pressure` | Barometric pressure at the station | hPa | S700 AP |
 | `/skybrightness` | Light intensity | lux | S700 LX |
 | `/windspeed` | Average wind speed | m/s | S700 SA |
 | `/windgust` | Peak wind gust | m/s | S700 SM |
-| `/winddirection` | Average wind direction | degrees | S700 DA |
+| `/winddirection` | Average wind direction, 0 when there is no wind | degrees | S700 DA |
 | `/rainrate` | Rainfall intensity | mm/h | S700 RI + sensor |
 | `/skytemperature` | IR sky temperature | °C | Max(MLX1, MLX2) |
-| `/relativeskytemperature` | Sky temp - air temp | °C | Calculated |
-| `/rawmlx` | Raw MLX sensor data | JSON | Both sensors |
+| `/averageperiod` | Always 0 (median filtered, not time averaged). PUT accepts only 0. | hours | - |
+| `/sensordescription?SensorName=` | Description of one sensor | - | - |
+| `/timesincelastupdate?SensorName=` | Seconds since the last valid reading, -1 if none yet. An empty name gives the newest of all sensors. | s | - |
+
+`cloudcover`, `skyquality`, `starfwhm` and `refresh` return NotImplemented (0x400).
+
+If a sensor has no valid reading for 60 seconds, its value returns a driver error (0x500) instead of an old value. While the device is disconnected, sensor values return NotConnected (0x407).
+
+Two extra members are kept for existing scripts. They are not part of the ASCOM interface:
+
+| Endpoint | Description | Units |
+|----------|-------------|-------|
+| `/relativeskytemperature` | Sky temp - air temp | °C |
+| `/rawmlx` | Raw MLX sensor data | JSON object |
 
 *Dew point uses formula from Górnicki et al., 2017 (M1 model)
 
-All endpoints return ASCOM-compliant JSON with `ClientID`, `ClientTransactionID`, `ErrorNumber`, `ErrorMessage`, and `Value` fields.
+Every reply has `ClientTransactionID`, `ServerTransactionID`, `ErrorNumber` and `ErrorMessage`, and `Value` when there is no error. Parameter names are not case sensitive. An unknown endpoint or a missing or invalid parameter returns HTTP 400.
 
 ## Compilation & Upload
 
@@ -228,17 +252,17 @@ Default safety limits can be modified in the `WeatherLimits` struct at the top o
 - Check RS485 wiring (A/B terminals)
 - Verify weather station address is `0XA` (check with manual commands)
 - Ensure baud rate is 9600
-- Serial monitor will show "No data received from weather station"
+- The web page shows "No data received from weather station"
 
 **MLX sensors not detected:**
 - Verify I2C addresses (0x5A and 0x5B)
 - Check SDA/SCL wiring to pins 11, 12
-- System will print "Communication with device failed" and wait
+- At startup the system tries each sensor 3 times, then continues. The relay stays unsafe and the web page shows the sensor error.
 
 **Safety relay not triggering:**
 - Check if limits are properly configured via web interface
 - Verify rain sensor connection to A7
-- Use Serial monitor to see which limit is being violated
+- Set `DEBUG = true` and use the Serial monitor to see which limit is being violated
 - Check `safety_false_duration` setting
 
 **Settings not persisting:**
@@ -248,7 +272,9 @@ Default safety limits can be modified in the `WeatherLimits` struct at the top o
 
 ### Serial Debugging
 
-Connect to Serial port at 9600 baud to see:
+Connect to Serial port at 9600 baud. Startup messages are always printed. Set `DEBUG = true` in the sketch to also see the sensor thread messages. Keep `DEBUG` off in normal use: a Serial write blocks while a host has the USB port open but does not read it, and the watchdog then resets the board.
+
+You can then see:
 - Weather station communication
 - Safety check failures (which limit was violated)
 - Sensor initialization status
@@ -258,11 +284,11 @@ Connect to Serial port at 9600 baud to see:
 ### Watchdog Timer
 
 The system includes a 20-second watchdog that will reset the PLC if:
-- The sensor thread hangs
-- Communication stalls
+- The sensor thread does not finish a cycle in 15 seconds
 - The main loop stops responding
+- The firmware crashes (a crash halts the board, and the watchdog then resets it)
 
-This ensures the system recovers automatically from crashes.
+The safety relay is off (unsafe) during the restart. The web page shows the cause of the last reset.
 
 ## Code Structure
 
@@ -271,14 +297,16 @@ This ensures the system recovers automatically from crashes.
 | Function | Purpose | Thread |
 |----------|---------|--------|
 | `setup()` | Initialize hardware, network, sensors, flash storage | Main |
-| `loop()` | Handle HTTP requests, kick watchdog | Main |
+| `loop()` | Handle HTTP requests and discovery, kick watchdog while the sensor thread is alive | Main |
 | `readSensors()` | Read all sensors every ~1s, evaluate safety | Sensor |
-| `readWeatherStation()` | Query S700 via RS485, parse response | Sensor |
+| `readWeatherStation()` | Query S700 via RS485 | Sensor |
+| `parseWeatherStation()` | Check and parse the S700 reply by key | Sensor |
 | `safetyCheck()` | Compare all readings against limits | Sensor |
-| `index()` | Serve HTML form for safety limits | Main |
+| `setupPage()` | Serve status and HTML form for safety limits | Main |
 | `submit()` | Process form submission, save to flash | Main |
-| `endPoint()` | Handle ASCOM API requests | Main |
-| `getLimits()` | Read safety limits from flash | Both |
+| `safetyMonitorEndPoint()` | Handle SafetyMonitor API requests | Main |
+| `conditionsEndPoint()` | Handle ObservingConditions API requests | Main |
+| `getLimits()` | Read safety limits from flash | Main |
 | `setLimits()` | Write safety limits to flash | Main |
 
 ### Data Flow
@@ -294,7 +322,10 @@ This ensures the system recovers automatically from crashes.
 - `WSValues[16]`: Weather station readings array
 - `skyTemperature`, `relativeSkyTemperature`: IR sensor values
 - `currentLimits`: Active safety thresholds
-- `ErrorNumber`, `ErrorMessage`: ASCOM error state
+- `sensorError`: Why the last sensor cycle failed (points to a fixed text)
+- `sensorHeartbeat`, `lastWeatherUpdate`, `lastSkyUpdate`: Times used by the watchdog and for stale data
+
+Each shared value is written in one 32-bit step, so the web server never reads half a value. ASCOM errors are kept per request.
 
 ## References
 
